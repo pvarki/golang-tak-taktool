@@ -50,16 +50,17 @@ Commands:
   datapackage, dp       Create data package
 
 Options:
-  -dpdeleteonreceive
-        Set data package "onReceiveDelete" option (default false)
-  -dpext string
+  -dbext string
         Set data package file extension (default "dpk")
-  -dpimportonreceive
-        Set data package "onReceiveImport" option (default true)
-  -dpname string
+  -dbname string
         Set data package name (default is current directory name)
-  -dpuid string
+  -dbuid string
         Set data package UID (default is randomly generated)
-  -renameplugins
-        Rename plugins to preferred names (default true) Note: this removes older plugins with the same name (default true)
+  -deleteonreceive
+        Set data package "onReceiveDelete" option (default false)
+  -importonreceive
+        Set data package "onReceiveImport" option (default false)
+  -renamepluginsdisabled
+        Disables renaming of plugins to preferred names (default false) Note: renaming removes older plugins with the same name
+
 ```
