@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 )
 
 func main() {
@@ -19,14 +20,17 @@ func main() {
 		flag.PrintDefaults()
 	}
 
-	flag.String("dpname", "", "Set data package name (default is current directory name)")
-	flag.String("dpuid", "", "Set data package UID (default is randomly generated)")
-	flag.String("dpext", "dpk", "Set data package file extension")
-	dpdeleteonreceive := flag.Bool("dpdeleteonreceive", false, "Set data package \"onReceiveDelete\" option (default false)")
-	dpimportonreceive := flag.Bool("dpimportonreceive", true, "Set data package \"onReceiveImport\" option")
-	renamePlugins := flag.Bool("renameplugins", true, "Rename plugins to preferred names (default true) Note: this removes older plugins with the same name")
+	// Note: flags are not parsed as flag package does not like arguments without dashes. These flags are only for usage print
+	flag.String("dbname", "", "Set data package name (default is current directory name)")
+	flag.String("dbuid", "", "Set data package UID (default is randomly generated)")
+	flag.String("dbext", "dpk", "Set data package file extension")
+	flag.Bool("deleteonreceive", false, "Set data package \"onReceiveDelete\" option (default false)")
+	flag.Bool("importonreceive", false, "Set data package \"onReceiveImport\" option (default false)")
+	flag.Bool("renamepluginsdisabled", false, "Disables renaming of plugins to preferred names (default false) Note: renaming removes older plugins with the same name")
 
 	flag.Parse()
+
+	dontRenamePlugins, dpDeleteOnReceive, dpImportOnReceive, dpName, dpUID, dpExt := manualFlagsParse() // Flag package cant parse flags if agruments without dash is used
 
 	// If no arguments, print usage
 	if flag.NArg() == 0 {
@@ -38,7 +42,7 @@ func main() {
 	switch arg0 {
 	case "pluginspackage", "pp":
 		// Käsittele pluginspackage komento
-		err := PackagePlugins(*renamePlugins)
+		err := PackagePlugins(!dontRenamePlugins)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating plugins package: %v\n", err)
 			os.Exit(1)
@@ -46,11 +50,11 @@ func main() {
 	case "datapackage", "dp":
 		// Käsittele datapackage komento
 		err := PackageDataPackage(
-			flag.Lookup("dpuid").Value.String(),
-			flag.Lookup("dpname").Value.String(),
-			flag.Lookup("dpext").Value.String(),
-			*dpdeleteonreceive,
-			*dpimportonreceive,
+			dpUID,
+			dpName,
+			dpExt,
+			dpDeleteOnReceive,
+			dpImportOnReceive,
 		)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating data package: %v\n", err)
@@ -60,4 +64,28 @@ func main() {
 		// Print usage if unknown command
 		flag.Usage()
 	}
+}
+
+func manualFlagsParse() (dontRenamePlugins, dpDeleteOnReceive, dpImportOnReceive bool, dpName, dpUID, dpExt string) {
+
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "-dontrenameplugins":
+			dontRenamePlugins = true
+		case "-dpdeleteonreceive":
+			dpDeleteOnReceive = true
+		case "-dpimportonreceive":
+			dpImportOnReceive = true
+		default:
+			if strings.HasPrefix(arg, "-dpname=") {
+				dpName = strings.TrimPrefix(arg, "-dpname=")
+			} else if strings.HasPrefix(arg, "-dpuid=") {
+				dpUID = strings.TrimPrefix(arg, "-dpuid=")
+			} else if strings.HasPrefix(arg, "-dpext=") {
+				dpExt = strings.TrimPrefix(arg, "-dpext=")
+			}
+		}
+	}
+
+	return
 }
