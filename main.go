@@ -70,11 +70,11 @@ func manualFlagsParse() (dontRenamePlugins, dpDeleteOnReceive, dpImportOnReceive
 
 	for _, arg := range os.Args[1:] {
 		switch arg {
-		case "-dontrenameplugins":
+		case "-renamepluginsdisabled":
 			dontRenamePlugins = true
-		case "-dpdeleteonreceive":
+		case "-deleteonreceive":
 			dpDeleteOnReceive = true
-		case "-dpimportonreceive":
+		case "-importonreceive":
 			dpImportOnReceive = true
 		default:
 			if strings.HasPrefix(arg, "-dpname=") {
@@ -89,3 +89,4 @@ func manualFlagsParse() (dontRenamePlugins, dpDeleteOnReceive, dpImportOnReceive
 
 	return
 }
+
