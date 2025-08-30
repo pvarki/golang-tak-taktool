@@ -68,6 +68,8 @@ func main() {
 
 func manualFlagsParse() (dontRenamePlugins, dpDeleteOnReceive, dpImportOnReceive bool, dpName, dpUID, dpExt string) {
 
+	dpExt = "dpk"
+	
 	for _, arg := range os.Args[1:] {
 		switch arg {
 		case "-renamepluginsdisabled":
@@ -89,4 +91,5 @@ func manualFlagsParse() (dontRenamePlugins, dpDeleteOnReceive, dpImportOnReceive
 
 	return
 }
+
 
