@@ -195,8 +195,14 @@ func buildManifest(manifest Manifest) (string, error) {
 }
 
 func removeFirstDotIfPresent(s string) string {
+
+	if len(s) == 0 {
+		return s
+	}
+	
 	if s[0] == '.' {
 		return s[1:]
 	}
 	return s
 }
+
