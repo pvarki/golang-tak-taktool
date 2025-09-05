@@ -1,0 +1,12 @@
+# Use this helper to build the taktool without installing Go locally
+# Example usage: docker compose up
+services:
+  build-taktool:
+    image: golang:latest
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      - GOOS=linux # or darwin, windows, etc.
+      - GOARCH=amd64 # or arm64, 386, etc.
+    command: go build -buildvcs=false -o taktool # Might want to add .exe suffix for windows
