@@ -57,11 +57,11 @@ Options:
   -dbuid string
         Set data package UID (default is randomly generated)
   -deleteonreceive
-        Set data package "onReceiveDelete" option (default false)
+        Set data package "onReceiveDelete" to delete the package after receive
   -importonreceive
-        Set data package "onReceiveImport" option (default false)
+        Set data package "onReceiveImport" to import the package after receive
   -renamepluginsdisabled
-        Disables renaming of plugins to preferred names (default false) Note: renaming removes older plugins with the same name
-
+        Disable renaming of plugins to preferred names. Renaming removes older plugins with the same name.
 ```
+
 

@@ -24,9 +24,9 @@ func main() {
 	flag.String("dbname", "", "Set data package name (default is current directory name)")
 	flag.String("dbuid", "", "Set data package UID (default is randomly generated)")
 	flag.String("dbext", "dpk", "Set data package file extension")
-	flag.Bool("deleteonreceive", false, "Set data package \"onReceiveDelete\" option (default false)")
-	flag.Bool("importonreceive", false, "Set data package \"onReceiveImport\" option (default false)")
-	flag.Bool("renamepluginsdisabled", false, "Disables renaming of plugins to preferred names (default false) Note: renaming removes older plugins with the same name")
+	flag.Bool("deleteonreceive", false, "Set data package \"onReceiveDelete\" to delete the package after receive")
+	flag.Bool("importonreceive", false, "Set data package \"onReceiveImport\" to import the package after receive")
+	flag.Bool("renamepluginsdisabled", false, "Disable renaming of plugins to preferred names. Renaming removes older plugins with the same name.")
 
 	flag.Parse()
 
@@ -92,3 +92,4 @@ func manualFlagsParse() (dontRenamePlugins, dpDeleteOnReceive, dpImportOnReceive
 
 	return
 }
+
