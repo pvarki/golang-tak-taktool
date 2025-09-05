@@ -41,14 +41,14 @@ func main() {
 	arg0 := flag.Arg(0)
 	switch arg0 {
 	case "pluginspackage", "pp":
-		// Käsittele pluginspackage komento
+		// Handle pluginspackage command
 		err := PackagePlugins(!dontRenamePlugins)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating plugins package: %v\n", err)
 			os.Exit(1)
 		}
 	case "datapackage", "dp":
-		// Käsittele datapackage komento
+		// Handle datapackage command
 		err := PackageDataPackage(
 			dpUID,
 			dpName,
@@ -68,8 +68,9 @@ func main() {
 
 func manualFlagsParse() (dontRenamePlugins, dpDeleteOnReceive, dpImportOnReceive bool, dpName, dpUID, dpExt string) {
 
+	// Datapackage default file extension
 	dpExt = "dpk"
-	
+
 	for _, arg := range os.Args[1:] {
 		switch arg {
 		case "-renamepluginsdisabled":
@@ -91,5 +92,3 @@ func manualFlagsParse() (dontRenamePlugins, dpDeleteOnReceive, dpImportOnReceive
 
 	return
 }
-
-

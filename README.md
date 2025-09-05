@@ -11,7 +11,7 @@
 
 ## Build and install
 
-1. Build with latest go
+1. Build with latest go **or** build with `docker compose up` (edit docker-compose.yml to your needs)
 
 ```bash
 # Linux amd64:
@@ -64,3 +64,4 @@ Options:
         Disables renaming of plugins to preferred names (default false) Note: renaming removes older plugins with the same name
 
 ```
+

@@ -108,9 +108,9 @@ func PackagePlugins(renamePlugins bool) error {
 			return fmt.Errorf("error creating icon file into zip: %w", err)
 		}
 
-		// Jos löytyy custom-kuva, niin käytetään sitä apk-paketin kuvan sijasta
+		// If a custom image is found, use it instead of the image from the apk package
 		if customImageFound {
-			// Kopioidaan custom-kuvan zip-tiedostoon newImageFileName nimen mukaisesti
+			// Copy custom image to zip with the name newImageFileName
 			customImagePath := filepath.Join("images", newImageFileName)
 			customImageFile, err := os.Open(customImagePath)
 			if err != nil {
@@ -128,7 +128,7 @@ func PackagePlugins(renamePlugins bool) error {
 
 			fmt.Println("Package", apkInfo.DisplayName, "does not have a png icon file. Creating empty png file...")
 
-			// TODO Kokeile ensimmäisenä, saako kuvan generoitua xml-tiedostosta
+			// TODO Might be possible to convert android xml icon to png with some library
 
 			// Empty png file
 			png := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82}
@@ -149,8 +149,8 @@ func PackagePlugins(renamePlugins bool) error {
 					defer imageFile.Close()
 
 					// TODO
-					// Tarkista kuvan koko ja skaalaa se tarvittaessa pienemmäksi 30% alkuperäisestä koosta
-					// Toista kunnes kuvan koko on esim. alle 50kt
+					// Check image size and scale it down if needed to 30% of the original size
+					// Repeat until the image size is e.g. under 50kb
 
 					// Add file to zip
 					_, err = io.Copy(fw, imageFile)
