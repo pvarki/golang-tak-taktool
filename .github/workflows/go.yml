@@ -47,7 +47,7 @@ jobs:
         # /repository/<repo>/yourapp/<version>/<filename>
         for file in taktool; do
           filename="$(basename "$file")"
-          upload_url="${NEXUS_BASE_URL}/repository/${NEXUS_REPOSITORY}/taktool/${filename}"
+          upload_url="${NEXUS_BASE_URL}/repository/${NEXUS_REPOSITORY}/${filename}"
           echo "Uploading $filename -> $upload_url"
 
           curl -f -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
