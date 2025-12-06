@@ -41,3 +41,16 @@ jobs:
           NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
       run: |
         set -euo pipefail
+
+
+        # Upload each packaged artifact into a versioned path:
+        # /repository/<repo>/yourapp/<version>/<filename>
+        for file in taktool; do
+          filename="$(basename "$file")"
+          upload_url="${NEXUS_BASE_URL}/repository/${NEXUS_REPOSITORY}/taktool/${filename}"
+          echo "Uploading $filename -> $upload_url"
+
+          curl -f -u "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" \
+              --upload-file "$file" \
+              "$upload_url"
+        done
