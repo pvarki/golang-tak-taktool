@@ -3,9 +3,13 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/xml"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"text/template"
 
@@ -21,14 +25,12 @@ type Manifest struct {
 }
 
 func PackageDataPackage(uid, name, fileExtension string, onReceiveDelete, onReceiveImport bool) error {
-
-	var err error
-	var UID uuid.UUID
-
 	// Handle UID
+	var UID uuid.UUID
 	if uid == "" {
 		UID = uuid.New()
 	} else {
+		var err error
 		UID, err = uuid.Parse(uid)
 		if err != nil {
 			return fmt.Errorf("error parsing UID: %w", err)
@@ -42,13 +44,10 @@ func PackageDataPackage(uid, name, fileExtension string, onReceiveDelete, onRece
 		if err != nil {
 			return fmt.Errorf("error getting working directory: %w", err)
 		}
+		name = filepath.Base(pwd)
 
-		// If there is / or \ in path, take name after the last one
-		name = pwd[strings.LastIndex(pwd, "/")+1:]
-		name = name[strings.LastIndex(name, "\\")+1:]
-
-		// If directory name is still empty, set name as default
-		if name == "" {
+		// filepath.Base returns "/" or "." for a root or empty path
+		if name == "" || name == "." || name == string(filepath.Separator) {
 			name = "default"
 		}
 	}
@@ -62,25 +61,14 @@ func PackageDataPackage(uid, name, fileExtension string, onReceiveDelete, onRece
 		OnReceiveImport: onReceiveImport,
 	}
 
-	// Get files and directories from directory
-	files, err := os.ReadDir(".")
+	// Collect files recursively. The package being created (and its temporary
+	// file) is skipped, so that a previous run's package is not put inside the
+	// new one.
+	files, err := collectFiles(".", dataPackageName, dataPackageName+".tmp")
 	if err != nil {
 		return fmt.Errorf("error reading directory: %w", err)
 	}
-
-	// Add files to manifest with relative paths
-	for _, file := range files {
-		if file.IsDir() {
-			// Read file path recursively
-			filenames, err := readDirFiles(file.Name())
-			if err != nil {
-				return fmt.Errorf("error reading directory files: %w", err)
-			}
-			manifest.FileContents = append(manifest.FileContents, filenames...)
-		} else {
-			manifest.FileContents = append(manifest.FileContents, file.Name())
-		}
-	}
+	manifest.FileContents = files
 
 	err = makeDataPackage(manifest, dataPackageName)
 	if err != nil {
@@ -92,117 +80,148 @@ func PackageDataPackage(uid, name, fileExtension string, onReceiveDelete, onRece
 	return nil
 }
 
-func makeDataPackage(manifest Manifest, name string) error {
-	// Create manifest
+// collectFiles returns the regular files under root as slash separated paths
+// relative to root, sorted. Files in root named in exclude are left out.
+func collectFiles(root string, exclude ...string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if slices.Contains(exclude, rel) {
+			return nil
+		}
+
+		// Follow symlinks to files, skip anything that is not a regular file
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			fmt.Println("Skipping (not a regular file):", rel)
+			return nil
+		}
+
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	})
+	return files, err
+}
+
+// makeDataPackage writes the package to a temporary file first and renames it
+// to name only after everything has been written, so that a failed run does
+// not leave a broken package behind.
+func makeDataPackage(manifest Manifest, name string) (err error) {
 	manifestData, err := buildManifest(manifest)
 	if err != nil {
 		return fmt.Errorf("error building manifest: %w", err)
 	}
 
-	// Create zip file to the working directory
-	file, err := os.Create(name)
+	tmpName := name + ".tmp" // keep in sync with the exclude list in PackageDataPackage
+	file, err := os.Create(tmpName)
 	if err != nil {
 		return fmt.Errorf("error creating file: %w", err)
 	}
+	defer func() {
+		if err != nil {
+			file.Close()
+			os.Remove(tmpName)
+		}
+	}()
 
 	zipWriter := zip.NewWriter(file)
-	defer zipWriter.Close()
 
 	// Write manifest to zip
 	mf, err := zipWriter.Create("MANIFEST/manifest.xml")
 	if err != nil {
 		return fmt.Errorf("error creating file: %w", err)
 	}
-	_, err = mf.Write([]byte(manifestData))
-	if err != nil {
+	if _, err = mf.Write([]byte(manifestData)); err != nil {
 		return fmt.Errorf("error writing manifest: %w", err)
 	}
 
 	// Write files to zip
-	for _, file := range manifest.FileContents {
-		f, err := os.Open(file)
-		if err != nil {
-			return fmt.Errorf("error opening file: %w", err)
-		}
-		defer f.Close()
-
-		// Create file in zip
-		fw, err := zipWriter.Create(file)
-		if err != nil {
-			return fmt.Errorf("error creating file: %w", err)
-		}
-
-		// Copy file to zip
-		_, err = io.Copy(fw, f)
-		if err != nil {
-			return fmt.Errorf("error copying file: %w", err)
+	for _, f := range manifest.FileContents {
+		if err = addFileToZip(zipWriter, f, f); err != nil {
+			return err
 		}
 	}
 
+	// Close writes the zip central directory, so its error must be checked
+	if err = zipWriter.Close(); err != nil {
+		return fmt.Errorf("error finishing zip: %w", err)
+	}
+	if err = file.Close(); err != nil {
+		return fmt.Errorf("error closing file: %w", err)
+	}
+	if err = os.Rename(tmpName, name); err != nil {
+		return fmt.Errorf("error renaming %s to %s: %w", tmpName, name, err)
+	}
 	return nil
 }
 
-func readDirFiles(path string) ([]string, error) {
-	files, err := os.ReadDir(path)
+// addFileToZip copies the file at srcPath into the zip as zipName.
+func addFileToZip(zw *zip.Writer, srcPath, zipName string) error {
+	f, err := os.Open(filepath.FromSlash(srcPath))
 	if err != nil {
-		return nil, fmt.Errorf("error reading directory: %v", err)
+		return fmt.Errorf("error opening file: %w", err)
 	}
-	var fileNames []string
-	for _, file := range files {
-		if file.IsDir() {
-			fileNames2, err := readDirFiles(path + "/" + file.Name())
-			if err != nil {
-				return nil, fmt.Errorf("error reading directory files: %v", err)
-			}
-			fileNames = append(fileNames, fileNames2...)
-			continue
-		}
-		fileNames = append(fileNames, path+"/"+file.Name())
+	defer f.Close()
+
+	fw, err := zw.Create(zipName)
+	if err != nil {
+		return fmt.Errorf("error creating file %s in zip: %w", zipName, err)
 	}
-	return fileNames, nil
+	if _, err := io.Copy(fw, f); err != nil {
+		return fmt.Errorf("error copying file %s: %w", srcPath, err)
+	}
+	return nil
 }
 
-func buildManifest(manifest Manifest) (string, error) {
-
-	template := template.New("manifest")
-
-	strTemplate := `<MissionPackageManifest version="2">
+const manifestTemplate = `<MissionPackageManifest version="2">
   <Configuration>
-    <Parameter name="uid" value="{{ .UID }}"/>
-    <Parameter name="name" value="{{ .Name }}"/>
-	<Parameter name="onReceiveImport" value="{{ .OnReceiveImport }}"/>
+    <Parameter name="uid" value="{{ xml .UID }}"/>
+    <Parameter name="name" value="{{ xml .Name }}"/>
+    <Parameter name="onReceiveImport" value="{{ .OnReceiveImport }}"/>
     <Parameter name="onReceiveDelete" value="{{ .OnReceiveDelete }}"/>
   </Configuration>
   <Contents>{{range .FileContents }}
-        <Content ignore="false" zipEntry="{{ . }}"/>{{end}}
+        <Content ignore="false" zipEntry="{{ xml . }}"/>{{end}}
   </Contents>
 </MissionPackageManifest>`
 
-	template, err := template.Parse(strTemplate)
+// xmlEscape escapes a string for use in XML text and attribute values.
+func xmlEscape(s string) (string, error) {
+	var b strings.Builder
+	if err := xml.EscapeText(&b, []byte(s)); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+func buildManifest(manifest Manifest) (string, error) {
+	tmpl, err := template.New("manifest").
+		Funcs(template.FuncMap{"xml": xmlEscape}).
+		Parse(manifestTemplate)
 	if err != nil {
 		return "", fmt.Errorf("error parsing template: %w", err)
 	}
 
 	var manifestStr bytes.Buffer
-	// Execute the template
-	err = template.Execute(&manifestStr, manifest)
-	if err != nil {
-		panic(err)
+	if err := tmpl.Execute(&manifestStr, manifest); err != nil {
+		return "", fmt.Errorf("error executing template: %w", err)
 	}
 
-	// Return the manifest as string
 	return manifestStr.String(), nil
 }
 
 func removeFirstDotIfPresent(s string) string {
-
-	if len(s) == 0 {
-		return s
-	}
-	
-	if s[0] == '.' {
-		return s[1:]
-	}
-	return s
+	return strings.TrimPrefix(s, ".")
 }
-
