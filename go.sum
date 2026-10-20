@@ -1,8 +1,10 @@
-github.com/avast/apkparser v0.0.0-20240729092610-90591e0804ae h1:rDNramK9mnAbvUBJyIRZnzHchM45cXexHIX9pS9da4Q=
-github.com/avast/apkparser v0.0.0-20240729092610-90591e0804ae/go.mod h1:GNvprXNmXaDjpHmN3RFxz5QdK5VXTUvmQludCbjoBy4=
+github.com/avast/apkparser v0.0.0-20251022140151-7294e274bf65 h1:PWsG673uVG5/lNT1ut/GDUGWXVuUihRw02UB73uyjYI=
+github.com/avast/apkparser v0.0.0-20251022140151-7294e274bf65/go.mod h1:3F9A8btIerUcuy7Fmno+g/nIk4ELKJ6NCs2/KK1bvLs=
+github.com/avast/apkverifier v0.0.0-20260710162049-d0e1a791cd5a h1:8chZxVfT6jnpiDC7tGMiWbkmiPWSZrRwBi7+fUkrJQ0=
+github.com/avast/apkverifier v0.0.0-20260710162049-d0e1a791cd5a/go.mod h1:LRDgSMX7AD3MdV5MlmZ9Sly1tcf1Dqa6olfKg3X9DB8=
+github.com/goccy/go-yaml v1.19.2 h1:PmFC1S6h8ljIz6gMRBopkjP1TVT7xuwrButHID66PoM=
+github.com/goccy/go-yaml v1.19.2/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/klauspost/compress v1.16.6 h1:91SKEy4K37vkp255cJ8QesJhjyRO0hn9i9G0GoUwLsk=
-github.com/klauspost/compress v1.16.6/go.mod h1:ntbaceVETuRiXiv4DpjP66DpAtAGkEQskQzEyD//IeE=
-github.com/klauspost/compress v1.17.11 h1:In6xLpyWOi1+C7tXUUWv2ot1QvBjxevKAaI6IXrJmUc=
-github.com/klauspost/compress v1.17.11/go.mod h1:pMDklpSncoRMuLFrf1W9Ss9KT+0rH90U12bZKk7uwG0=
+github.com/klauspost/compress v1.18.0 h1:c/Cqfb0r+Yi+JtIEq73FWXVkRonBlf0CRNYc8Zttxdo=
+github.com/klauspost/compress v1.18.0/go.mod h1:2Pp+KzxcywXVXMr50+X0Q/Lsb43OQHYWRCY2AiWywWQ=
