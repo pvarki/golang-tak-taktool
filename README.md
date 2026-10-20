@@ -155,6 +155,12 @@ packages:
 # Which ATAK is distributed: small (default) or full. See "ATAK small and full".
 atak: small
 
+# Optional. Copy the PDF manuals of the distributed apks into this folder
+# (any name, flat, not inside the update folder). See "Manuals".
+manuals: ../manuals
+# Also copy the other PDFs found in the apks, with their own names
+allmanuals: false
+
 # Optional. The ATAK versions a package is distributed to, instead of the
 # version found in the apk: "all", one version or a list of versions.
 targets:
@@ -218,6 +224,25 @@ the versionName disagrees. It distributes the variant set by `atak`. If the apk 
 has the other variant for a version, that one is distributed with a warning. Because both variants have the
 same versionCode, changing `atak` replaces the apk in the update folder, but devices that already have that
 ATAK version will probably not be offered the other variant as an update.
+
+### Manuals
+
+With `manuals` in `taktool.yaml`, `taktool repo` copies the manuals bundled in the distributed apks into that
+folder:
+
+| From | Named |
+|---|---|
+| plugin: `assets/usermanual.pdf` | `ATAK 5.8 VNS 4.0 UserGuide.pdf` |
+| ATAK: `assets/support/docs/*.pdf` | `ATAK 5.8 UserGuide.pdf`, `ATAK 5.8 IconGlossary.pdf` |
+
+The names follow `<Product> <TAK version> <Plugin> <plugin version> <DocType>.pdf`; the plugin name is the
+label without spaces (`Data Sync` -> `DataSync`). A manual is written only if it is missing or its content has
+changed; nothing is deleted from the folder.
+
+Other PDFs in an apk may be outdated (Data Sync 5.0.2 also bundles the guide of version 3.5), so they are only
+listed in the report. With `allmanuals: true` they are copied too, as `<Plugin> <original name>.pdf`.
+
+The manuals folder must not be inside the update folder: TAK Server would serve it to every device.
 
 Before changing anything, `taktool repo` shows the report and asks for confirmation. Without a terminal
 (scripts, cron) it does not change anything unless `-yes` is given. If you are not sure, run `-dry-run` first.

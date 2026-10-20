@@ -106,6 +106,9 @@ type repoPlan struct {
 	leftovers []leftover
 	moved     []string // apks in the apk folder that are moved into version folders
 	warnings  []string
+
+	manuals     []manualFile // manuals to add or update in the manuals folder
+	manualNotes []string     // other PDFs that are not copied
 }
 
 func (p *repoPlan) warn(format string, args ...any) {
@@ -166,7 +169,7 @@ func PackageRepository(o repoOptions, in io.Reader, out io.Writer) error {
 
 // hasWork reports whether executing the plan would change anything.
 func (p *repoPlan) hasWork(cleanSource bool) bool {
-	if len(p.remove) > 0 || len(p.moved) > 0 {
+	if len(p.remove) > 0 || len(p.moved) > 0 || len(p.manuals) > 0 {
 		return true
 	}
 	for _, vp := range p.versions {
@@ -272,6 +275,9 @@ func planRepository(cfg *Config) (*repoPlan, error) {
 	}
 
 	if err := plan.planOutputCleanup(); err != nil {
+		return nil, err
+	}
+	if err := plan.planManuals(); err != nil {
 		return nil, err
 	}
 	return plan, nil
@@ -717,6 +723,16 @@ func printRepoReport(w io.Writer, p *repoPlan, dryRun, cleanSource bool) {
 		}
 	}
 
+	if p.cfg.Manuals != "" && (len(p.manuals) > 0 || len(p.manualNotes) > 0) {
+		fmt.Fprintf(w, "\nManuals (%s):\n", p.cfg.Manuals)
+		for _, m := range p.manuals {
+			fmt.Fprintf(w, "  %s %s\n", m.state, m.name)
+		}
+		for _, n := range p.manualNotes {
+			fmt.Fprintf(w, "  %s\n", n)
+		}
+	}
+
 	if len(p.warnings) > 0 {
 		fmt.Fprintln(w, "\nWarnings:")
 		for _, s := range p.warnings {
@@ -728,6 +744,12 @@ func printRepoReport(w io.Writer, p *repoPlan, dryRun, cleanSource bool) {
 func executeRepoPlan(p *repoPlan, cleanSource bool) error {
 	cfg := p.cfg
 	if err := os.MkdirAll(cfg.Output, 0o755); err != nil {
+		return err
+	}
+
+	// Before the version folders are rebuilt: the apks are read from where
+	// they are now
+	if err := writeManuals(cfg.Manuals, p.manuals); err != nil {
 		return err
 	}
 

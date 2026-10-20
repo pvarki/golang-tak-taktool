@@ -36,17 +36,25 @@ const configFileName = "taktool.yaml"
 //	# (civ-release: also 32-bit devices, bundled apps, but about 3x larger)
 //	atak: small
 //
+//	# Optional. Copy the PDF manuals of the distributed apks into this folder
+//	# (any name, not inside the update folder). allmanuals: true also copies
+//	# the other PDFs found in the apks, with their own names.
+//	manuals: ../manuals
+//	allmanuals: false
+//
 //	# Optional. The ATAK versions a package is distributed to, instead of the
 //	# version found in the apk: "all", one version or a list of versions.
 //	targets:
 //	  io.opentakserver.opentakicu: all
 //	  com.example.foo.plugin: [5.7.0, 5.8.0]
 type Config struct {
-	Versions []string       `yaml:"versions"`
-	Output   string         `yaml:"output"`
-	Packages []string       `yaml:"packages"`
-	Targets  map[string]any `yaml:"targets"`
-	Atak     string         `yaml:"atak"`
+	Versions   []string       `yaml:"versions"`
+	Output     string         `yaml:"output"`
+	Packages   []string       `yaml:"packages"`
+	Targets    map[string]any `yaml:"targets"`
+	Atak       string         `yaml:"atak"`
+	Manuals    string         `yaml:"manuals"`
+	AllManuals bool           `yaml:"allmanuals"`
 
 	// targets resolved to version lists
 	targets map[string][]string
@@ -110,6 +118,18 @@ func loadConfig(path string) (*Config, error) {
 	case atakSmall, atakFull:
 	default:
 		return nil, fmt.Errorf("%s: atak: %q, use small or full", path, c.Atak)
+	}
+
+	if c.Manuals != "" {
+		if !filepath.IsAbs(c.Manuals) {
+			c.Manuals = filepath.Join(c.Dir, c.Manuals)
+		}
+		c.Manuals = filepath.Clean(c.Manuals)
+		if rel, err := filepath.Rel(c.Output, c.Manuals); err == nil && !strings.HasPrefix(rel, "..") {
+			return nil, fmt.Errorf("%s: manuals must not be inside the update folder %s (TAK Server would serve them to every device)", path, c.Output)
+		}
+	} else if c.AllManuals {
+		return nil, fmt.Errorf("%s: allmanuals needs manuals (the folder for the manuals)", path)
 	}
 
 	c.targets = map[string][]string{}
