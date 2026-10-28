@@ -9,30 +9,67 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
 jobs:
 
   build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        goos: [linux]
-        goarch: [amd64]
-        include:
-          - goos: linux
-            goarch: amd64
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v6
       with:
-        go-version: '1.25.5'
+        go-version: '1.25.x'
+
+    - name: Check formatting
+      run: |
+        unformatted="$(gofmt -l .)"
+        if [ -n "$unformatted" ]; then
+          echo "These files are not gofmt formatted:"
+          echo "$unformatted"
+          exit 1
+        fi
+
+    - name: Vet
+      run: go vet ./...
+
+    - name: Test
+      run: go test ./...
 
     - name: Build
       run: go build -o taktool
 
+    # Binaries for testers: downloadable from the workflow run's Summary page
+    # (Artifacts). Built for every run, including pull requests.
+    - name: Build test binaries
+      shell: bash
+      env:
+        CGO_ENABLED: "0"
+      run: |
+        set -euo pipefail
+        mkdir -p dist
+        for target in linux/amd64 linux/arm64 windows/amd64; do
+          GOOS="${target%/*}" GOARCH="${target#*/}"
+          out="dist/taktool-${GOOS}-${GOARCH}"
+          [ "$GOOS" = windows ] && out="${out}.exe"
+          echo "Building $out"
+          GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -o "$out"
+        done
+        ls -l dist
+
+    - name: Upload test binaries
+      uses: actions/upload-artifact@v6
+      with:
+        name: taktool-${{ github.event.pull_request.head.sha || github.sha }}
+        path: dist/
+        retention-days: 30
+
+    # Only upload builds from main, never from pull requests
     - name: Upload to nexus
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       shell: bash
       env:
           NEXUS_BASE_URL: ${{ secrets.NEXUS_BASE_URL }}
