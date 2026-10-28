@@ -9,13 +9,20 @@ import (
 )
 
 func usage(w io.Writer) {
-	fmt.Fprintf(w, "Usage:  taktool COMMAND [OPTIONS]\n\n")
-	fmt.Fprintf(w, "Commands:\n")
-	fmt.Fprintf(w, "  pluginspackage, pp\tCreate plugins package\n")
-	fmt.Fprintf(w, "  datapackage, dp\tCreate data package\n")
-	fmt.Fprintf(w, "  repo\t\t\tBuild the update folder for several ATAK versions (uses %s)\n", configFileName)
-	fmt.Fprintf(w, "  check\t\t\tCheck an update folder and show the distributed versions\n\n")
-	fmt.Fprintf(w, "Run 'taktool COMMAND -h' to see the options of a command.\n")
+	fmt.Fprint(w, `Usage:  taktool COMMAND [OPTIONS]
+
+Update folder for TAK Server (several ATAK versions, uses taktool.yaml):
+  init                 Create the folders and taktool.yaml
+  repo                 Build the update folder from the apks
+  check                Check an update folder and show what it distributes
+  manuals              Copy the manuals of the distributed apks
+
+Single folder:
+  pluginspackage, pp   Create product.infz for the apks in this folder
+  datapackage, dp      Create a data package of this folder
+
+Run 'taktool COMMAND -h' to see the options of a command.
+`)
 }
 
 func main() {
@@ -68,6 +75,37 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return flagErrorCode(err)
 		}
 		return runCheck(opts, stdout, stderr)
+	case "manuals":
+		opts, err := parseManualsFlags(cmdArgs, stderr)
+		if err != nil {
+			return flagErrorCode(err)
+		}
+		if err := PackageManuals(opts, stdout); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+	case "init":
+		fs := flag.NewFlagSet("init", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		fs.Usage = func() {
+			fmt.Fprintln(stderr, "Usage: taktool init [folder]")
+			fmt.Fprintln(stderr, "\nCreates apks/ (with taktool.yaml and images/), update/ and manuals/ in folder")
+			fmt.Fprintln(stderr, "(default: the current folder). Nothing that exists already is changed.")
+		}
+		if err := fs.Parse(cmdArgs); err != nil {
+			return flagErrorCode(err)
+		}
+		base := "."
+		if fs.NArg() > 1 {
+			fs.Usage()
+			return 2
+		} else if fs.NArg() == 1 {
+			base = fs.Arg(0)
+		}
+		if err := InitFolder(stdout, base); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
 	case "-h", "-help", "--help", "help":
 		usage(stdout)
 	default:
@@ -160,9 +198,13 @@ func parseRepoFlags(args []string, out io.Writer) (repoOptions, error) {
 	fs.SetOutput(out)
 	fs.StringVar(&o.config, "config", configFileName, "Configuration file; the apks are read from its folder")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "Show what would be done without changing anything")
-	fs.BoolVar(&o.cleanSource, "cleansource", false,
+	fs.BoolVar(&o.cleanSource, "clean", false,
 		"Also remove apks that are certainly not needed from the apk folder (older revisions, copies, Git LFS pointers)")
+	fs.BoolVar(&o.cleanSource, "cleansource", false, "Same as -clean")
+	fs.BoolVar(&o.cleanAll, "cleanall", false,
+		"Remove every apk from the apk folder that is not moved into the update folder (also excluded ones and the other ATAK variant)")
 	fs.BoolVar(&o.yes, "yes", false, "Apply the changes without asking for confirmation (for scripts)")
+	fs.BoolVar(&o.verbose, "v", false, "Verbose: also show the full summary, every apk left in the apk folder, other PDFs and icon notes")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -236,4 +278,21 @@ func runCheck(o checkOptions, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func parseManualsFlags(args []string, out io.Writer) (manualsOptions, error) {
+	var o manualsOptions
+	fs := flag.NewFlagSet("manuals", flag.ContinueOnError)
+	fs.SetOutput(out)
+	fs.StringVar(&o.config, "config", configFileName, "Configuration file")
+	fs.BoolVar(&o.dryRun, "dry-run", false, "Show what would be copied without copying")
+	fs.BoolVar(&o.verbose, "v", false, "Verbose: also list the other PDFs that are not copied")
+	if err := fs.Parse(args); err != nil {
+		return o, err
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(out, "unexpected arguments: %v\n", fs.Args())
+		return o, fmt.Errorf("unexpected arguments")
+	}
+	return o, nil
 }

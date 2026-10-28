@@ -133,39 +133,75 @@ func manualsInApk(a *repoApk, v string, all bool) (manuals []manualFile, others 
 // which of them are new or changed in the manuals folder.
 func (p *repoPlan) planManuals() error {
 	cfg := p.cfg
-	if cfg.Manuals == "" {
+	if cfg.Manuals.Folder == "" {
 		return nil
 	}
-	seen := map[string]bool{}
-	reported := map[string]bool{}
+
+	// The same apk (e.g. HelmCam, which does not depend on the ATAK version)
+	// can be distributed to several versions. Its manuals are copied once,
+	// named after the highest of those versions.
+	type use struct {
+		apk     *repoApk
+		version string
+	}
+	var order []string
+	latest := map[string]use{} // apk content hash -> highest version
 	for _, vp := range p.versions {
 		for _, a := range vp.sortedApks() {
-			manuals, others, err := manualsInApk(a, vp.version, cfg.AllManuals)
-			if err != nil {
-				p.warn("%s: cannot read manuals: %v", filepath.Base(a.path), err)
-				continue
+			key := a.info.Hash
+			if key == "" {
+				key = a.path
 			}
-			if len(others) > 0 && !reported[a.info.Package+a.info.Revision] {
-				reported[a.info.Package+a.info.Revision] = true
-				p.manualNotes = append(p.manualNotes, fmt.Sprintf("%s: other PDFs not copied (set allmanuals: true): %s",
-					a.name(), strings.Join(others, ", ")))
+			u, seen := latest[key]
+			if !seen {
+				order = append(order, key)
 			}
-			for _, m := range manuals {
-				key := strings.ToLower(m.name)
-				if seen[key] {
-					continue
-				}
-				seen[key] = true
-				state, err := manualState(filepath.Join(cfg.Manuals, m.name), m)
-				if err != nil {
-					return err
-				}
-				if state != "" {
-					m.state = state
-					p.manuals = append(p.manuals, m)
-				}
+			if !seen || compareVersions(vp.version, u.version) > 0 {
+				latest[key] = use{a, vp.version}
 			}
 		}
+	}
+
+	seen := map[string]bool{}
+	others := map[string][]string{} // package label -> other PDFs, listed once
+	var labels []string
+	for _, key := range order {
+		u := latest[key]
+		manuals, other, err := manualsInApk(u.apk, u.version, cfg.Manuals.All)
+		if err != nil {
+			p.warn("%s: cannot read manuals: %v", filepath.Base(u.apk.path), err)
+			continue
+		}
+		label := u.apk.info.DisplayName
+		for _, o := range other {
+			if _, ok := others[label]; !ok {
+				labels = append(labels, label)
+			}
+			if !slices.Contains(others[label], o) {
+				others[label] = append(others[label], o)
+			}
+		}
+		for _, m := range manuals {
+			k := strings.ToLower(m.name)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			state, err := manualState(filepath.Join(cfg.Manuals.Folder, m.name), m)
+			if err != nil {
+				return err
+			}
+			if state != "" {
+				m.state = state
+				p.manuals = append(p.manuals, m)
+			}
+		}
+	}
+
+	slices.SortFunc(labels, func(a, b string) int { return strings.Compare(strings.ToLower(a), strings.ToLower(b)) })
+	for _, l := range labels {
+		p.manualNotes = append(p.manualNotes, fmt.Sprintf("%s: other PDFs not copied (set allmanuals: true): %s",
+			l, strings.Join(others[l], ", ")))
 	}
 	slices.SortFunc(p.manuals, func(a, b manualFile) int { return strings.Compare(a.name, b.name) })
 	return nil

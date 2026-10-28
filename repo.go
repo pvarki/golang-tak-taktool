@@ -87,16 +87,27 @@ type leftover struct {
 	file   string
 	reason string
 	// removable is true if the apk is certainly not needed (an older
-	// revision, a copy of a distributed apk, a Git LFS pointer); -cleansource
+	// revision, a copy of a distributed apk, a Git LFS pointer); -clean
 	// removes these.
 	removable bool
+	// expected is true if the apk is left on purpose (excluded, not in
+	// packages, the other ATAK variant) or certainly not needed; these are
+	// only listed with -v
+	expected bool
 }
 
 type versionPlan struct {
 	version string
 	exists  bool                // the version folder exists already
 	apks    map[string]*repoApk // package -> apk to distribute
-	changes []string
+	added   []string
+	updated []string
+	removed []string
+	other   []string // e.g. renamed apks, rebuilt product.infz
+}
+
+func (vp *versionPlan) hasChanges() bool {
+	return len(vp.added)+len(vp.updated)+len(vp.removed)+len(vp.other) > 0 || !vp.exists
 }
 
 type repoPlan struct {
@@ -106,6 +117,11 @@ type repoPlan struct {
 	leftovers []leftover
 	moved     []string // apks in the apk folder that are moved into version folders
 	warnings  []string
+
+	missingIcons []string // apps without a usable icon and without a custom image
+	// notes about icons: icons converted to png, custom images that are the
+	// same as the apk's own icon or differ from it
+	convertedIcons, sameCustom, differentCustom []string
 
 	manuals     []manualFile // manuals to add or update in the manuals folder
 	manualNotes []string     // other PDFs that are not copied
@@ -120,12 +136,39 @@ type sourceResult struct {
 	used      bool
 	reason    string
 	removable bool
+	expected  bool
 }
 
 type repoOptions struct {
 	config              string
 	dryRun, cleanSource bool
+	cleanAll            bool // remove every apk that is not distributed
 	yes                 bool // apply without asking
+	verbose             bool
+}
+
+// cleanMode says which apks of the apk folder are removed.
+type cleanMode int
+
+const (
+	cleanNone cleanMode = iota
+	cleanSafe           // -clean: apks that are certainly not needed
+	cleanAll            // -cleanall: every apk that is not distributed
+)
+
+func (o repoOptions) clean() cleanMode {
+	switch {
+	case o.cleanAll:
+		return cleanAll
+	case o.cleanSource:
+		return cleanSafe
+	}
+	return cleanNone
+}
+
+// removedBy reports whether the clean mode removes the leftover apk.
+func (l leftover) removedBy(m cleanMode) bool {
+	return m == cleanAll || (m == cleanSafe && l.removable)
 }
 
 // errNotConfirmed is returned when the user does not confirm the changes.
@@ -141,17 +184,28 @@ func PackageRepository(o repoOptions, in io.Reader, out io.Writer) error {
 		return err
 	}
 
-	printRepoReport(out, plan, o.dryRun, o.cleanSource)
+	printRepoReport(out, plan, reportOptions{dryRun: o.dryRun, clean: o.clean(), verbose: o.verbose})
 	if o.dryRun {
 		return nil
 	}
-	if !plan.hasWork(o.cleanSource) {
+	updateWork := plan.hasWork(cleanNone)
+	cleanCount := plan.cleanCount(o.clean())
+	if !updateWork && cleanCount == 0 {
 		fmt.Fprintln(out, "\nNothing to do.")
 		return nil
 	}
 	if !o.yes {
-		ok, err := confirm(in, out, fmt.Sprintf(
-			"\nApply these changes to %s?\nIf you are not sure, answer n and run 'taktool repo -dry-run' first. [y/N]: ", cfg.Output))
+		var question string
+		switch {
+		case updateWork && cleanCount > 0:
+			question = fmt.Sprintf("Apply these changes to %s\nand remove %d apks from %s?", cfg.Output, cleanCount, cfg.Dir)
+		case updateWork:
+			question = fmt.Sprintf("Apply these changes to %s?", cfg.Output)
+		default:
+			question = fmt.Sprintf("The update folder is up to date. Remove %d apks from %s?", cleanCount, cfg.Dir)
+		}
+		ok, err := confirm(in, out, "\n"+question+
+			"\nIf you are not sure, answer n and run 'taktool repo -dry-run -v' first. [y/N]: ")
 		if err != nil {
 			return err
 		}
@@ -160,34 +214,50 @@ func PackageRepository(o repoOptions, in io.Reader, out io.Writer) error {
 		}
 	}
 
-	if err := executeRepoPlan(plan, o.cleanSource); err != nil {
+	var log io.Writer = io.Discard
+	if o.verbose {
+		log = &uniqueLines{w: out}
+	}
+	if err := executeRepoPlan(plan, o.clean(), log); err != nil {
 		return err
 	}
-	fmt.Fprintln(out, "\nUpdate folder ready:", cfg.Output)
+	fmt.Fprintln(out)
+	if updateWork {
+		fmt.Fprintln(out, "Update folder ready:", cfg.Output)
+	} else {
+		fmt.Fprintln(out, "Update folder up to date:", cfg.Output)
+	}
+	if cleanCount > 0 {
+		fmt.Fprintf(out, "Removed %d apks from %s\n", cleanCount, cfg.Dir)
+	}
 	return nil
 }
 
+// cleanCount returns the number of apks the clean mode removes.
+func (p *repoPlan) cleanCount(m cleanMode) int {
+	n := 0
+	for _, l := range p.leftovers {
+		if l.removedBy(m) {
+			n++
+		}
+	}
+	return n
+}
+
 // hasWork reports whether executing the plan would change anything.
-func (p *repoPlan) hasWork(cleanSource bool) bool {
+func (p *repoPlan) hasWork(clean cleanMode) bool {
 	if len(p.remove) > 0 || len(p.moved) > 0 || len(p.manuals) > 0 {
 		return true
 	}
 	for _, vp := range p.versions {
-		if len(vp.changes) > 0 {
+		if vp.hasChanges() {
 			return true
 		}
 	}
 	if _, err := os.Stat(filepath.Join(p.cfg.Output, repositoriesInfFilename)); err != nil {
 		return true
 	}
-	if cleanSource {
-		for _, l := range p.leftovers {
-			if l.removable {
-				return true
-			}
-		}
-	}
-	return false
+	return p.cleanCount(clean) > 0
 }
 
 // confirm asks a yes/no question. When in is the standard input and it is
@@ -270,14 +340,20 @@ func planRepository(cfg *Config) (*repoPlan, error) {
 			if r.reason == "" {
 				r.reason = "not used"
 			}
-			plan.leftovers = append(plan.leftovers, leftover{file: filepath.Base(f), reason: r.reason, removable: r.removable})
+			plan.leftovers = append(plan.leftovers, leftover{file: filepath.Base(f), reason: r.reason,
+				removable: r.removable, expected: r.expected || r.removable})
 		}
 	}
 
 	if err := plan.planOutputCleanup(); err != nil {
 		return nil, err
 	}
-	if err := plan.planManuals(); err != nil {
+	if cfg.Manuals.WithRepo {
+		if err := plan.planManuals(); err != nil {
+			return nil, err
+		}
+	}
+	if err := plan.planIcons(); err != nil {
 		return nil, err
 	}
 	return plan, nil
@@ -303,6 +379,11 @@ func (p *repoPlan) scanSource() (map[string][]*repoApk, map[string]*sourceResult
 		res := &sourceResult{}
 		results[path] = res
 
+		if pattern, ok := cfg.excluded(e.Name()); ok {
+			res.reason, res.expected = fmt.Sprintf("excluded in %s (%s)", configFileName, pattern), true
+			continue
+		}
+
 		if lfs, err := isLFSPointer(path); err != nil {
 			return nil, nil, err
 		} else if lfs {
@@ -318,8 +399,12 @@ func (p *repoPlan) scanSource() (map[string][]*repoApk, map[string]*sourceResult
 		a := &repoApk{info: info, path: path}
 		p.setVariant(a)
 
+		if pattern, ok := cfg.excluded(info.Package); ok {
+			res.reason, res.expected = fmt.Sprintf("%s (%s) excluded in %s (%s)", a.name(), info.Package, configFileName, pattern), true
+			continue
+		}
 		if !cfg.wantsPackage(info.Package) {
-			res.reason = fmt.Sprintf("%s (%s) is not in packages; add it to %s to distribute it", a.name(), info.Package, configFileName)
+			res.reason, res.expected = fmt.Sprintf("%s (%s) is not in packages; add it to %s to distribute it", a.name(), info.Package, configFileName), true
 			continue
 		}
 
@@ -385,7 +470,7 @@ func (p *repoPlan) pickAtakVariant(v string, list []*repoApk, results map[string
 	var out []*repoApk
 	for _, a := range list {
 		if a.variant != "" && a.variant != want && hasWanted[a.info.Package] {
-			setResult(results, a.path, fmt.Sprintf("ATAK %s, but atak: %s in %s", a.variant, want, configFileName), false)
+			setExpected(results, a.path, fmt.Sprintf("ATAK %s, but atak: %s in %s", a.variant, want, configFileName))
 			continue
 		}
 		out = append(out, a)
@@ -412,10 +497,12 @@ func (p *repoPlan) newestPerPackage(list []*repoApk, results map[string]*sourceR
 		}
 		switch {
 		case a.revision() > b.revision():
-			setResult(results, b.path, fmt.Sprintf("older than %s in the apk folder", filepath.Base(a.path)), true)
+			setResult(results, b.path, fmt.Sprintf("older (revision %s) than %s (revision %s) in the apk folder",
+				b.info.Revision, filepath.Base(a.path), a.info.Revision), true)
 			byPkg[a.info.Package] = a
 		case a.revision() < b.revision():
-			setResult(results, a.path, fmt.Sprintf("older than %s in the apk folder", filepath.Base(b.path)), true)
+			setResult(results, a.path, fmt.Sprintf("older (revision %s) than %s (revision %s) in the apk folder",
+				a.info.Revision, filepath.Base(b.path), b.info.Revision), true)
 		case a.info.Hash == b.info.Hash:
 			setResult(results, a.path, fmt.Sprintf("copy of %s", filepath.Base(b.path)), true)
 		default:
@@ -445,6 +532,15 @@ func setResult(results map[string]*sourceResult, path, reason string, removable 
 	r.reason, r.removable = reason, removable
 }
 
+// setExpected is setResult for an apk that is left on purpose.
+func setExpected(results map[string]*sourceResult, path, reason string) {
+	r := results[path]
+	if r.used || r.reason != "" {
+		return
+	}
+	r.reason, r.expected = reason, true
+}
+
 // planVersion merges the apks of the apk folder into a version folder.
 func (p *repoPlan) planVersion(v string, candidates []*repoApk, results map[string]*sourceResult) (*versionPlan, error) {
 	cfg := p.cfg
@@ -455,7 +551,6 @@ func (p *repoPlan) planVersion(v string, candidates []*repoApk, results map[stri
 	entries, err := os.ReadDir(dir)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		vp.changes = append(vp.changes, "new version folder")
 	case err != nil:
 		return nil, err
 	default:
@@ -465,7 +560,7 @@ func (p *repoPlan) planVersion(v string, candidates []*repoApk, results map[stri
 		path := filepath.Join(dir, e.Name())
 		if e.IsDir() || !isApkFile(e.Name()) {
 			if e.Name() != productInfzFilename {
-				vp.changes = append(vp.changes, "remove "+e.Name())
+				vp.removed = append(vp.removed, e.Name())
 			}
 			continue
 		}
@@ -473,19 +568,23 @@ func (p *repoPlan) planVersion(v string, candidates []*repoApk, results map[stri
 			return nil, err
 		} else if lfs {
 			p.warn("%s/%s is a Git LFS pointer, not an apk; removed", v, e.Name())
-			vp.changes = append(vp.changes, "remove "+e.Name()+" (Git LFS pointer)")
+			vp.removed = append(vp.removed, e.Name()+" (Git LFS pointer)")
 			continue
 		}
 		info, err := getApkData(path)
 		if err != nil {
 			p.warn("%s/%s cannot be read (%v); removed", v, e.Name(), err)
-			vp.changes = append(vp.changes, "remove "+e.Name()+" (cannot read)")
+			vp.removed = append(vp.removed, e.Name()+" (cannot read)")
 			continue
 		}
 		a := &repoApk{info: info, path: path}
 		p.setVariant(a)
 		if !cfg.wantsPackage(info.Package) {
-			vp.changes = append(vp.changes, fmt.Sprintf("remove %s (not in packages)", a.name()))
+			vp.removed = append(vp.removed, a.name()+" (not in packages)")
+			continue
+		}
+		if pattern, ok := cfg.excluded(info.Package); ok {
+			vp.removed = append(vp.removed, fmt.Sprintf("%s (excluded: %s)", a.name(), pattern))
 			continue
 		}
 		if b, dup := vp.apks[info.Package]; dup {
@@ -494,7 +593,7 @@ func (p *repoPlan) planVersion(v string, candidates []*repoApk, results map[stri
 				keep, drop = a, b
 			}
 			vp.apks[info.Package] = keep
-			vp.changes = append(vp.changes, fmt.Sprintf("remove %s (older copy of %s)", filepath.Base(drop.path), keep.info.DisplayName))
+			vp.removed = append(vp.removed, fmt.Sprintf("%s (older copy of %s)", filepath.Base(drop.path), keep.info.DisplayName))
 			continue
 		}
 		vp.apks[info.Package] = a
@@ -512,25 +611,26 @@ func (p *repoPlan) planVersion(v string, candidates []*repoApk, results map[stri
 		switch {
 		case !exists:
 			vp.apks[c.info.Package] = c
-			vp.changes = append(vp.changes, fmt.Sprintf("add %s", c.name()))
+			vp.added = append(vp.added, c.name())
 			res.used = true
 		case better && c.variant != e.variant:
 			vp.apks[c.info.Package] = c
-			vp.changes = append(vp.changes, fmt.Sprintf("%s -> %s", e.name(), c.name()))
+			vp.updated = append(vp.updated, fmt.Sprintf("%s -> %s", e.name(), c.name()))
 			res.used = true
 		case !better && !sameRank && c.variant != e.variant:
-			setResult(results, c.path, fmt.Sprintf("ATAK %s, but atak: %s in %s and %s is in %s",
-				c.variant, p.cfg.Atak, configFileName, e.name(), v), false)
+			setExpected(results, c.path, fmt.Sprintf("ATAK %s, but atak: %s in %s and %s is in %s",
+				c.variant, p.cfg.Atak, configFileName, e.name(), v))
 		case better:
 			if signersDiffer(e.path, c.path) {
 				p.warn("%s %s: the new apk is signed with a different certificate than the one it replaces; "+
 					"devices cannot update it, the old version must be uninstalled first", v, c.info.DisplayName)
 			}
 			vp.apks[c.info.Package] = c
-			vp.changes = append(vp.changes, fmt.Sprintf("%s %s -> %s", c.info.DisplayName, shortVersion(e.info.Version), shortVersion(c.info.Version)))
+			vp.updated = append(vp.updated, fmt.Sprintf("%s %s -> %s", c.info.DisplayName, shortVersion(e.info.Version), shortVersion(c.info.Version)))
 			res.used = true
 		case !sameRank:
-			setResult(results, c.path, fmt.Sprintf("older than %s in %s", e.name(), v), true)
+			setResult(results, c.path, fmt.Sprintf("older (revision %s) than %s (revision %s) in %s",
+				c.info.Revision, e.name(), e.info.Revision, v), true)
 		case c.info.Hash == e.info.Hash:
 			setResult(results, c.path, fmt.Sprintf("already in %s", v), true)
 		default:
@@ -554,10 +654,10 @@ func (p *repoPlan) planVersion(v string, candidates []*repoApk, results map[stri
 	// An existing version folder may need to be rebuilt even if no apk
 	// changed: apks with other names, or a product.infz written by an older
 	// version of taktool or with other icons
-	if vp.exists && len(vp.changes) == 0 {
+	if vp.exists && !vp.hasChanges() {
 		for _, a := range vp.sortedApks() {
 			if want := preferredApkName(a.info); filepath.Base(a.path) != want {
-				vp.changes = append(vp.changes, fmt.Sprintf("rename %s -> %s", filepath.Base(a.path), want))
+				vp.other = append(vp.other, fmt.Sprintf("rename %s -> %s", filepath.Base(a.path), want))
 			}
 		}
 		same, err := p.productInfzUpToDate(vp, dir)
@@ -565,7 +665,7 @@ func (p *repoPlan) planVersion(v string, candidates []*repoApk, results map[stri
 			return nil, err
 		}
 		if !same {
-			vp.changes = append(vp.changes, "update "+productInfzFilename)
+			vp.other = append(vp.other, "rebuild "+productInfzFilename)
 		}
 	}
 
@@ -628,6 +728,52 @@ func (vp *versionPlan) productInfos() []ApkInfo {
 	return infos
 }
 
+// planIcons checks the icon of each distributed app: apps without a usable
+// icon and without a custom image, icons converted to png, and custom images
+// that are the same as the apk's own icon or differ from it.
+func (p *repoPlan) planIcons() error {
+	imagesDir := filepath.Join(p.cfg.Dir, "images")
+	custom, err := checkForCustomImages(imagesDir)
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for _, vp := range p.versions {
+		for _, a := range vp.sortedApks() {
+			if seen[a.info.Package] {
+				continue
+			}
+			seen[a.info.Package] = true
+			name := preferredApkName(a.info)
+			c := customImageFor(a.info, strings.TrimSuffix(name, filepath.Ext(name))+".png", custom)
+			own, kind, iconErr := apkIcon(a.path, a.info.IconPath)
+			label := a.info.DisplayName
+			switch {
+			case c != "" && iconErr != nil:
+				// the custom image is needed
+			case c != "":
+				mine, err := os.ReadFile(filepath.Join(imagesDir, c))
+				if err != nil {
+					return err
+				}
+				if bytes.Equal(mine, own) {
+					p.sameCustom = append(p.sameCustom, fmt.Sprintf("%s: images/%s", label, c))
+				} else {
+					p.differentCustom = append(p.differentCustom, fmt.Sprintf("%s: images/%s (the apk has a %s icon)", label, c, kind))
+				}
+			case iconErr != nil:
+				p.missingIcons = append(p.missingIcons, fmt.Sprintf("%s: images/%s (or %s.png)", label, shortImageName(a.info), a.info.Package))
+			case kind != "png":
+				p.convertedIcons = append(p.convertedIcons, fmt.Sprintf("%s (%s)", label, kind))
+			}
+		}
+	}
+	for _, l := range [][]string{p.missingIcons, p.convertedIcons, p.sameCustom, p.differentCustom} {
+		slices.SortFunc(l, func(a, b string) int { return strings.Compare(strings.ToLower(a), strings.ToLower(b)) })
+	}
+	return nil
+}
+
 // planOutputCleanup lists everything in the update folder that is not a
 // listed version folder or repositories.inf. Hidden files (e.g. .keep) are
 // left alone.
@@ -671,67 +817,155 @@ func (vp *versionPlan) sortedApks() []*repoApk {
 	return list
 }
 
-func printRepoReport(w io.Writer, p *repoPlan, dryRun, cleanSource bool) {
-	if dryRun {
+// reportOptions controls what printRepoReport prints.
+type reportOptions struct {
+	dryRun  bool
+	clean   cleanMode
+	verbose bool // also the summary, expected leftovers and notes
+}
+
+// writeList writes items separated by commas, wrapped at about 100 columns,
+// each line indented by indent.
+func writeList(w io.Writer, indent string, items []string) {
+	line := indent
+	for i, it := range items {
+		if i < len(items)-1 {
+			it += ","
+		}
+		if line != indent && len(line)+1+len(it) > 100 {
+			fmt.Fprintln(w, line)
+			line = indent
+		}
+		if line != indent {
+			line += " "
+		}
+		line += it
+	}
+	fmt.Fprintln(w, line)
+}
+
+func sortedCopy(items []string) []string {
+	out := slices.Clone(items)
+	slices.SortFunc(out, func(a, b string) int { return strings.Compare(strings.ToLower(a), strings.ToLower(b)) })
+	return out
+}
+
+func printRepoReport(w io.Writer, p *repoPlan, o reportOptions) {
+	if o.dryRun {
 		fmt.Fprintln(w, "Dry run, nothing is changed.")
 		fmt.Fprintln(w)
 	}
 
-	fmt.Fprintln(w, "Changes:")
 	changed := false
 	for _, vp := range p.versions {
-		if len(vp.changes) > 0 {
-			fmt.Fprintf(w, "  %s: %s\n", vp.version, strings.Join(vp.changes, ", "))
+		if !vp.hasChanges() {
+			continue
+		}
+		if !changed {
+			fmt.Fprintln(w, "Changes:")
 			changed = true
 		}
-	}
-	for _, n := range p.remove {
-		if versionRe.MatchString(n) {
-			fmt.Fprintf(w, "  %s: remove (not in versions)\n", n)
+		fmt.Fprintln(w)
+		if vp.exists {
+			fmt.Fprintln(w, vp.version)
 		} else {
-			fmt.Fprintf(w, "  remove %s\n", n)
+			fmt.Fprintln(w, vp.version+" (new version folder)")
 		}
-		changed = true
+		for _, g := range []struct {
+			title string
+			items []string
+		}{{"Added", vp.added}, {"Updated", vp.updated}, {"Removed", vp.removed}, {"Other", vp.other}} {
+			if len(g.items) > 0 {
+				fmt.Fprintf(w, "  %s:\n", g.title)
+				writeList(w, "    ", sortedCopy(g.items))
+			}
+		}
+	}
+	if len(p.remove) > 0 {
+		if !changed {
+			fmt.Fprintln(w, "Changes:")
+			changed = true
+		}
+		var items []string
+		for _, n := range p.remove {
+			if versionRe.MatchString(n) {
+				n += " (not in versions)"
+			}
+			items = append(items, n)
+		}
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Removed from the update folder:")
+		writeList(w, "    ", items)
 	}
 	if !changed {
-		fmt.Fprintln(w, "  none")
+		fmt.Fprintln(w, "Changes: none")
 	}
 
-	fmt.Fprintln(w, "\nSummary:")
-	for _, vp := range p.versions {
-		var names []string
-		for _, a := range vp.sortedApks() {
-			names = append(names, a.name())
+	if o.verbose {
+		fmt.Fprintln(w, "\nSummary:")
+		for _, vp := range p.versions {
+			var names []string
+			for _, a := range vp.sortedApks() {
+				names = append(names, a.name())
+			}
+			if len(names) == 0 {
+				names = []string{"(nothing)"}
+			}
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, vp.version)
+			writeList(w, "    ", names)
 		}
-		if len(names) == 0 {
-			names = []string{"(nothing)"}
-		}
-		fmt.Fprintf(w, "  %s: %s\n", vp.version, strings.Join(names, ", "))
 	}
 
-	if len(p.leftovers) > 0 {
+	var attention, expected []leftover
+	for _, l := range p.leftovers {
+		if l.expected {
+			expected = append(expected, l)
+		} else {
+			attention = append(attention, l)
+		}
+	}
+	shown := attention
+	if o.verbose {
+		shown = p.leftovers
+	}
+	if len(shown) > 0 || len(expected) > 0 {
 		fmt.Fprintln(w, "\nLeft in the apk folder:")
-		for _, l := range p.leftovers {
+		for _, l := range shown {
 			mark := ""
 			switch {
-			case l.removable && cleanSource:
-				mark = " [removed by -cleansource]"
+			case o.clean == cleanAll:
+				mark = " [removed by -cleanall]"
+			case l.removable && o.clean == cleanSafe:
+				mark = " [removed by -clean]"
 			case l.removable:
-				mark = " [-cleansource would remove]"
+				mark = " [-clean would remove]"
 			}
 			fmt.Fprintf(w, "  %s: %s%s\n", l.file, l.reason, mark)
 		}
+		if !o.verbose && len(expected) > 0 {
+			removable := 0
+			for _, l := range expected {
+				if l.removable {
+					removable++
+				}
+			}
+			msg := fmt.Sprintf("  %d apks left as expected (excluded, the other ATAK variant, older or already distributed); -v lists them", len(expected))
+			switch {
+			case o.clean == cleanAll:
+				msg += ". -cleanall removes them"
+			case removable > 0 && o.clean == cleanSafe:
+				msg += fmt.Sprintf(". -clean removes %d of them", removable)
+			case removable > 0:
+				msg += fmt.Sprintf(". -clean would remove %d of them", removable)
+			}
+			fmt.Fprintln(w, msg)
+		}
 	}
 
-	if p.cfg.Manuals != "" && (len(p.manuals) > 0 || len(p.manualNotes) > 0) {
-		fmt.Fprintf(w, "\nManuals (%s):\n", p.cfg.Manuals)
-		for _, m := range p.manuals {
-			fmt.Fprintf(w, "  %s %s\n", m.state, m.name)
-		}
-		for _, n := range p.manualNotes {
-			fmt.Fprintf(w, "  %s\n", n)
-		}
-	}
+	printManuals(w, p, o.verbose, false)
+
+	printIconNotes(w, p, o.verbose)
 
 	if len(p.warnings) > 0 {
 		fmt.Fprintln(w, "\nWarnings:")
@@ -741,7 +975,30 @@ func printRepoReport(w io.Writer, p *repoPlan, dryRun, cleanSource bool) {
 	}
 }
 
-func executeRepoPlan(p *repoPlan, cleanSource bool) error {
+// uniqueLines writes each distinct line once (the same icon note would
+// otherwise be printed for every version).
+type uniqueLines struct {
+	w    io.Writer
+	seen map[string]bool
+}
+
+func (u *uniqueLines) Write(b []byte) (int, error) {
+	if u.seen == nil {
+		u.seen = map[string]bool{}
+	}
+	for _, line := range strings.SplitAfter(string(b), "\n") {
+		if line == "" || u.seen[line] {
+			continue
+		}
+		u.seen[line] = true
+		if _, err := io.WriteString(u.w, line); err != nil {
+			return 0, err
+		}
+	}
+	return len(b), nil
+}
+
+func executeRepoPlan(p *repoPlan, clean cleanMode, log io.Writer) error {
 	cfg := p.cfg
 	if err := os.MkdirAll(cfg.Output, 0o755); err != nil {
 		return err
@@ -749,12 +1006,15 @@ func executeRepoPlan(p *repoPlan, cleanSource bool) error {
 
 	// Before the version folders are rebuilt: the apks are read from where
 	// they are now
-	if err := writeManuals(cfg.Manuals, p.manuals); err != nil {
+	if err := writeManuals(cfg.Manuals.Folder, p.manuals); err != nil {
 		return err
 	}
 
 	for _, vp := range p.versions {
-		if err := buildVersionFolder(cfg, vp); err != nil {
+		if !vp.hasChanges() {
+			continue // up to date, also its product.infz
+		}
+		if err := buildVersionFolder(cfg, vp, log); err != nil {
 			return fmt.Errorf("%s: %w", vp.version, err)
 		}
 	}
@@ -776,12 +1036,10 @@ func executeRepoPlan(p *repoPlan, cleanSource bool) error {
 		}
 	}
 
-	if cleanSource {
-		for _, l := range p.leftovers {
-			if l.removable {
-				if err := os.Remove(filepath.Join(cfg.Dir, l.file)); err != nil {
-					return err
-				}
+	for _, l := range p.leftovers {
+		if l.removedBy(clean) {
+			if err := os.Remove(filepath.Join(cfg.Dir, l.file)); err != nil {
+				return err
 			}
 		}
 	}
@@ -791,7 +1049,7 @@ func executeRepoPlan(p *repoPlan, cleanSource bool) error {
 // buildVersionFolder builds the version folder in a temporary folder and
 // swaps it in place when it is complete, so TAK Server never serves a half
 // built folder.
-func buildVersionFolder(cfg *Config, vp *versionPlan) error {
+func buildVersionFolder(cfg *Config, vp *versionPlan, log io.Writer) error {
 	dir := filepath.Join(cfg.Output, vp.version)
 	tmp := filepath.Join(cfg.Output, "."+vp.version+".tmp")
 	old := filepath.Join(cfg.Output, "."+vp.version+".old")
@@ -813,7 +1071,7 @@ func buildVersionFolder(cfg *Config, vp *versionPlan) error {
 		}
 		infos[i].srcPath = ""
 	}
-	if err := writeProductInfz(tmp, infos, filepath.Join(cfg.Dir, "images"), os.Stdout); err != nil {
+	if err := writeProductInfz(tmp, infos, filepath.Join(cfg.Dir, "images"), log); err != nil {
 		return err
 	}
 
@@ -863,4 +1121,40 @@ func writeRepositoriesInf(dir string, versions []string) error {
 		return err
 	}
 	return os.Rename(tmp, name)
+}
+
+// printIconNotes prints the icon notes: in short, or with verbose in full.
+func printIconNotes(w io.Writer, p *repoPlan, verbose bool) {
+	if !verbose {
+		var parts []string
+		if n := len(p.missingIcons); n > 0 {
+			parts = append(parts, fmt.Sprintf("%d apps have no usable icon and are shown with an empty icon in ATAK", n))
+		}
+		if n := len(p.differentCustom); n > 0 {
+			parts = append(parts, fmt.Sprintf("%d images/ files replace a different icon that the apk has (it may be newer)", n))
+		}
+		if n := len(p.sameCustom); n > 0 {
+			parts = append(parts, fmt.Sprintf("%d images/ files are the same as the apk's own icon and not needed", n))
+		}
+		if len(parts) > 0 {
+			fmt.Fprintf(w, "\nIcons: %s; -v lists them\n", strings.Join(parts, ", "))
+		}
+		return
+	}
+	section := func(title string, lines []string) {
+		if len(lines) == 0 {
+			return
+		}
+		fmt.Fprintf(w, "\n%s\n", title)
+		for _, l := range lines {
+			fmt.Fprintf(w, "  %s\n", l)
+		}
+	}
+	section("No usable icon (shown empty in ATAK); add a png to the images folder:", p.missingIcons)
+	section("Custom image differs from the apk's own icon (which may be newer); remove it to use the apk's icon:", p.differentCustom)
+	section("A custom image is the same as the apk's own icon and is not needed:", p.sameCustom)
+	if len(p.convertedIcons) > 0 {
+		fmt.Fprintln(w, "\nIcons converted to png:")
+		writeList(w, "    ", p.convertedIcons)
+	}
 }

@@ -2,9 +2,11 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -96,16 +98,88 @@ func TestManualsInApk(t *testing.T) {
 
 func TestConfigManuals(t *testing.T) {
 	dir := t.TempDir()
-	c, err := loadConfig(writeConfig(t, dir, "versions: [5.8.0]\nmanuals: docs\n"))
-	if err != nil || c.Manuals != filepath.Join(dir, "docs") {
-		t.Errorf("manuals %q, %v", c.Manuals, err)
+	c, err := loadConfig(writeConfig(t, dir, "versions: [5.8.0]\nmanuals:\n  folder: docs\n  all: true\n"))
+	if err != nil || c.Manuals.Folder != filepath.Join(dir, "docs") || !c.Manuals.All || c.Manuals.WithRepo {
+		t.Errorf("manuals %+v, %v", c.Manuals, err)
 	}
 	for _, bad := range []string{
-		"versions: [5.8.0]\noutput: up\nmanuals: up/docs\n",
-		"versions: [5.8.0]\nallmanuals: true\n",
+		"versions: [5.8.0]\noutput: up\nmanuals:\n  folder: up/docs\n",
+		"versions: [5.8.0]\nmanuals:\n  withrepo: true\n",
+		"versions: [5.8.0]\nmanuals: docs\n", // old form
 	} {
 		if _, err := loadConfig(writeConfig(t, dir, bad)); err == nil {
 			t.Errorf("expected an error for %q", bad)
+		}
+	}
+}
+
+func TestOneManualForAnApkInSeveralVersions(t *testing.T) {
+	dir := t.TempDir()
+	apk := filepath.Join(dir, "helmcam.apk")
+	writeZip(t, apk, map[string]string{"assets/usermanual.pdf": "guide"})
+	a := &repoApk{path: apk, info: ApkInfo{Package: "com.atakmap.helmcam", DisplayName: "HelmCam", Version: "7.0.1 (8123dd5)", Hash: "h"}}
+	p := &repoPlan{cfg: &Config{Manuals: ManualsConfig{Folder: filepath.Join(dir, "manuals")}}}
+	for _, v := range []string{"5.6.0", "5.8.0", "5.7.0"} {
+		p.versions = append(p.versions, &versionPlan{version: v, apks: map[string]*repoApk{a.info.Package: a}})
+	}
+	if err := p.planManuals(); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.manuals) != 1 || p.manuals[0].name != "ATAK 5.8 HelmCam 7.0.1 UserGuide.pdf" {
+		t.Errorf("manuals %+v", p.manuals)
+	}
+}
+
+func TestInitFolder(t *testing.T) {
+	base := t.TempDir()
+	var out bytes.Buffer
+	if err := InitFolder(&out, base); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"apks/images", "update", "manuals"} {
+		if st, err := os.Stat(filepath.Join(base, d)); err != nil || !st.IsDir() {
+			t.Errorf("%s not created", d)
+		}
+	}
+	cfgPath := filepath.Join(base, "apks", configFileName)
+	c, err := loadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("created %s does not load: %v", configFileName, err)
+	}
+	if c.Manuals.WithRepo || c.Output != filepath.Join(base, "update") || c.Manuals.Folder != filepath.Join(base, "manuals") {
+		t.Errorf("config %+v", c)
+	}
+
+	// A second run changes nothing
+	os.WriteFile(cfgPath, []byte("versions: [5.8.0]\n"), 0o644)
+	out.Reset()
+	if err := InitFolder(&out, base); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(cfgPath); string(b) != "versions: [5.8.0]\n" {
+		t.Error("existing taktool.yaml was changed")
+	}
+	if strings.Contains(out.String(), "created:") {
+		t.Errorf("second run created something:\n%s", out.String())
+	}
+}
+
+func TestConfigSyntaxError(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "apks")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, configFileName)
+	if err := os.WriteFile(path, []byte("versions: [5.8.0]\nmanuals: ../manuals\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadConfig(path)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range []string{"has an error", "manuals is a group", "folder: ../manuals", "'taktool init ..'"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not contain %q:\n%v", want, err)
 		}
 	}
 }

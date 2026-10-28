@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -164,14 +165,14 @@ func TestPlanAndExecuteCleanup(t *testing.T) {
 	}
 
 	var report bytes.Buffer
-	printRepoReport(&report, plan, true, false)
-	for _, s := range []string{"5.5.0: remove (not in versions)", "5.8.0: remove stray.txt", "5.9.0: new version folder", "5.9.0: no apks to distribute"} {
+	printRepoReport(&report, plan, reportOptions{dryRun: true})
+	for _, s := range []string{"5.5.0 (not in versions)", "5.8.0\n  Removed:\n    stray.txt", "5.9.0 (new version folder)", "5.9.0: no apks to distribute"} {
 		if !strings.Contains(report.String(), s) {
 			t.Errorf("report does not contain %q:\n%s", s, report.String())
 		}
 	}
 
-	if err := executeRepoPlan(plan, false); err != nil {
+	if err := executeRepoPlan(plan, cleanNone, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := filesIn(t, out), []string{".keep", "5.8.0", "5.9.0", "repositories.inf"}; !slices.Equal(got, want) {
@@ -244,10 +245,10 @@ func TestCheckRepository(t *testing.T) {
 	if len(r.errors) != 0 {
 		t.Errorf("unexpected errors %v", r.errors)
 	}
-	if want := "5.8.0: ATAK 5.8.0.3, Data Sync 5.0.2, VNS 4.0"; r.summary[0] != want {
-		t.Errorf("summary %q, want %q", r.summary[0], want)
+	if want := []string{"ATAK 5.8.0.3", "Data Sync 5.0.2", "VNS 4.0"}; r.summary[0].version != "5.8.0" || !slices.Equal(r.summary[0].apps, want) {
+		t.Errorf("summary %+v, want 5.8.0 %v", r.summary[0], want)
 	}
-	if !slices.ContainsFunc(r.warnings, func(s string) bool { return strings.Contains(s, "5.9.0: Data Sync") && strings.Contains(s, "missing") }) {
+	if !slices.ContainsFunc(r.warnings, func(s string) bool { return s == "5.9.0: no Data Sync (com.atakmap.android.datasync.plugin); it is in 5.8.0" }) {
 		t.Errorf("missing Data Sync in 5.9.0 not reported: %v", r.warnings)
 	}
 
@@ -267,13 +268,13 @@ func TestCheckRepository(t *testing.T) {
 		"5.9.0/vns_plugin.apk: sha256",
 		"5.9.0/extra.apk is not listed",
 		"folder 5.5.0 is not listed",
-		"5.8.0: com.example.missing.plugin (com.example.missing.plugin) is missing",
+		"5.8.0: no com.example.missing.plugin (com.example.missing.plugin)",
 	} {
 		if !strings.Contains(joined, s) {
 			t.Errorf("not reported: %q\n%s", s, joined)
 		}
 	}
-	if strings.Contains(joined, "Data Sync (com.atakmap.android.datasync.plugin) is missing") {
+	if strings.Contains(joined, "no Data Sync (com.atakmap.android.datasync.plugin)") {
 		t.Error("with packages in taktool.yaml, only those packages should be required")
 	}
 	if len(r.errors) != 2 {
@@ -472,5 +473,159 @@ func TestProductInfRowDiff(t *testing.T) {
 	row.OsReq = "1"
 	if d := productInfRowDiff(row, apk); !strings.Contains(d, "os requirement") {
 		t.Errorf("os requirement difference not found: %q", d)
+	}
+}
+
+func TestFileNameVersionNotPartOfLongerNumber(t *testing.T) {
+	for file, want := range map[string]string{
+		"ATAKGo-4.18.0.190-CIV-dcd3ce6-release.apk":          "",
+		"ATAKGo-v5_5.18.1.83-CIV_0e70751-release.apk":        "",
+		"ATAK-Plugin-vns-4.2-4bb952de-5.6.0-civ-release.apk": "5.6.0",
+		"somewear-atak-1.1.26.0-5.7.0-civ.apk":               "5.7.0",
+	} {
+		got := detectAtakTarget(ApkInfo{Package: "x", Version: "1.0"}, file)
+		if got.Version != want {
+			t.Errorf("%s: version %q, want %q", file, got.Version, want)
+		}
+	}
+}
+
+func TestConfigExclude(t *testing.T) {
+	dir := t.TempDir()
+	c, err := loadConfig(writeConfig(t, dir, "versions: [5.8.0]\nexclude: [\"*UASTool-DIUBLUE*\", \"*-LM-*\", com.atakmap.android.atakgo.dji]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{
+		"ATAK-Plugin-UASTool-DIUBLUE-13.0.6-1cb6f8ca-5.8.0-civ-release.apk":  true,
+		"ATAK-Plugin-uastool-diublue-13.0.6.apk":                             true,
+		"ATAK-Plugin-UASTool-12.12.8.1-39ed1326-5.6.0-civ-release-LM-I4.apk": true,
+		"ATAK-Plugin-uastool-13.0.6.1-d6d81c4f-5.8.0-civ-release.apk":        false,
+		"com.atakmap.android.atakgo.dji":                                     true,
+		"com.atakmap.android.atakgov5.dji":                                   false,
+	} {
+		if _, got := c.excluded(name); got != want {
+			t.Errorf("excluded(%q) = %v, want %v", name, got, want)
+		}
+	}
+	if _, err := loadConfig(writeConfig(t, dir, "versions: [5.8.0]\nexclude: [\"[\"]\n")); err == nil {
+		t.Error("expected an error for a bad pattern")
+	}
+}
+
+func TestExcludedApkStaysInApkFolder(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "apks")
+	os.Mkdir(src, 0o755)
+	os.WriteFile(filepath.Join(src, "ATAK-Plugin-UASTool-DIUBLUE-1.0.apk"), []byte("x"), 0o644)
+	cfg, err := loadConfig(writeConfig(t, src, "versions: [5.8.0]\noutput: ../update\nexclude: [\"*diublue*\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := planRepository(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.leftovers) != 1 || !strings.Contains(plan.leftovers[0].reason, "excluded") || plan.leftovers[0].removable {
+		t.Errorf("leftovers %+v", plan.leftovers)
+	}
+}
+
+func TestWriteListWraps(t *testing.T) {
+	var b bytes.Buffer
+	items := make([]string, 30)
+	for i := range items {
+		items[i] = "Plugin Name 1.0"
+	}
+	writeList(&b, "    ", items)
+	for _, line := range strings.Split(strings.TrimRight(b.String(), "\n"), "\n") {
+		if len(line) > 100 || !strings.HasPrefix(line, "    ") {
+			t.Errorf("line %q", line)
+		}
+	}
+	if strings.Count(b.String(), "Plugin Name 1.0") != 30 || strings.HasSuffix(strings.TrimSpace(b.String()), ",") {
+		t.Errorf("list:\n%s", b.String())
+	}
+}
+
+func TestUniqueLines(t *testing.T) {
+	var b bytes.Buffer
+	u := &uniqueLines{w: &b}
+	fmt.Fprintln(u, "a")
+	fmt.Fprintln(u, "b")
+	fmt.Fprintln(u, "a")
+	if b.String() != "a\nb\n" {
+		t.Errorf("got %q", b.String())
+	}
+}
+
+func TestIsAtakApp(t *testing.T) {
+	for pkg, want := range map[string]bool{
+		"com.atakmap.app": true, "com.atakmap.app.civ": true, "com.atakmap.app.mil": true,
+		"com.atakmap.app.flavor.mil": false, "com.atakmap.app.encryption.x": false, "com.atakmap.android.vns.plugin": false,
+	} {
+		if got := isAtakApp(pkg); got != want {
+			t.Errorf("isAtakApp(%q) = %v", pkg, got)
+		}
+	}
+}
+
+func TestRepoCleanOnly(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "apks")
+	out := filepath.Join(base, "update")
+	os.Mkdir(src, 0o755)
+	cfgPath := writeConfig(t, src, "versions: [5.8.0]\noutput: ../update\n")
+	if err := PackageRepository(repoOptions{config: cfgPath, yes: true}, strings.NewReader(""), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(filepath.Join(out, "5.8.0"))
+
+	ptr := filepath.Join(src, "ptr.apk")
+	os.WriteFile(ptr, []byte("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 1\n"), 0o644)
+	var report bytes.Buffer
+	if err := PackageRepository(repoOptions{config: cfgPath, cleanSource: true}, strings.NewReader("y\n"), &report); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"The update folder is up to date. Remove 1 apks", "Removed 1 apks"} {
+		if !strings.Contains(report.String(), want) {
+			t.Errorf("report does not contain %q:\n%s", want, report.String())
+		}
+	}
+	if _, err := os.Stat(ptr); !os.IsNotExist(err) {
+		t.Error("the LFS pointer was not removed")
+	}
+	if st2, _ := os.Stat(filepath.Join(out, "5.8.0")); !os.SameFile(st, st2) {
+		t.Error("the up to date version folder was rebuilt")
+	}
+}
+
+func TestRepoCleanAll(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "apks")
+	os.Mkdir(src, 0o755)
+	cfgPath := writeConfig(t, src, "versions: [5.8.0]\noutput: ../update\nexclude: [\"*legacy*\"]\n")
+	os.WriteFile(filepath.Join(src, "wave-legacy.apk"), []byte("PK"), 0o644)
+	os.WriteFile(filepath.Join(src, "ptr.apk"), []byte("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 1\n"), 0o644)
+	os.WriteFile(filepath.Join(src, "notes.txt"), []byte("x"), 0o644)
+
+	// -clean removes only the LFS pointer
+	if err := PackageRepository(repoOptions{config: cfgPath, cleanSource: true, yes: true}, strings.NewReader(""), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := filesIn(t, src); !slices.Equal(got, []string{"notes.txt", configFileName, "wave-legacy.apk"}) {
+		t.Errorf("after -clean: %v", got)
+	}
+
+	// -cleanall also removes the excluded apk, but no other files
+	var report bytes.Buffer
+	if err := PackageRepository(repoOptions{config: cfgPath, cleanAll: true}, strings.NewReader("y\n"), &report); err != nil {
+		t.Fatal(err)
+	}
+	if got := filesIn(t, src); !slices.Equal(got, []string{"notes.txt", configFileName}) {
+		t.Errorf("after -cleanall: %v", got)
+	}
+	if !strings.Contains(report.String(), "Removed 1 apks") {
+		t.Errorf("report:\n%s", report.String())
 	}
 }

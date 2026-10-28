@@ -20,8 +20,13 @@ type productInfRow struct {
 	OsReq, TakReq, Size                                     string
 }
 
+type versionSummary struct {
+	version string
+	apps    []string
+}
+
 type checkResult struct {
-	summary  []string
+	summary  []versionSummary
 	errors   []string
 	warnings []string
 }
@@ -45,7 +50,9 @@ func CheckRepository(w io.Writer, dir string, cfg *Config) (int, error) {
 
 	fmt.Fprintln(w, "Summary:")
 	for _, s := range r.summary {
-		fmt.Fprintf(w, "  %s\n", s)
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, s.version)
+		writeList(w, "    ", s.apps)
 	}
 	if len(r.errors) > 0 {
 		fmt.Fprintln(w, "\nErrors:")
@@ -69,6 +76,9 @@ func checkRepository(dir string, cfg *Config) (*checkResult, error) {
 	r := &checkResult{}
 
 	data, err := os.ReadFile(filepath.Join(dir, repositoriesInfFilename))
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("%s has no %s: it is not an update folder yet; run 'taktool repo' first", dir, repositoriesInfFilename)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cannot read %s: %w", repositoriesInfFilename, err)
 	}
@@ -148,7 +158,7 @@ func checkRepository(dir string, cfg *Config) (*checkResult, error) {
 		if len(summary) == 0 {
 			summary = []string{"(nothing)"}
 		}
-		r.summary = append(r.summary, fmt.Sprintf("%s: %s", v, strings.Join(summary, ", ")))
+		r.summary = append(r.summary, versionSummary{v, summary})
 	}
 
 	// Packages missing from some versions: the packages of taktool.yaml, or
@@ -167,9 +177,20 @@ func checkRepository(dir string, cfg *Config) (*checkResult, error) {
 		if name == "" {
 			name = pkg
 		}
+		var in []string
 		for _, v := range versions {
-			if _, ok := byPkg[pkg][v]; !ok {
-				r.warnf("%s: %s (%s) is missing", v, name, pkg)
+			if _, ok := byPkg[pkg][v]; ok {
+				in = append(in, v)
+			}
+		}
+		for _, v := range versions {
+			if _, ok := byPkg[pkg][v]; ok {
+				continue
+			}
+			if len(in) > 0 {
+				r.warnf("%s: no %s (%s); it is in %s", v, name, pkg, strings.Join(in, ", "))
+			} else {
+				r.warnf("%s: no %s (%s)", v, name, pkg)
 			}
 		}
 	}

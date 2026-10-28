@@ -220,3 +220,54 @@ func TestIsApkFile(t *testing.T) {
 		}
 	}
 }
+
+func TestCustomImageFor(t *testing.T) {
+	a := ApkInfo{Package: "com.atakmap.android.wind.plugin"}
+	list := []string{"vns_plugin.png", "COM.ATAKMAP.ANDROID.WIND.PLUGIN.png"}
+	if got := customImageFor(a, "wind_data_plugin.png", list); got != "COM.ATAKMAP.ANDROID.WIND.PLUGIN.png" {
+		t.Errorf("by package name: %q", got)
+	}
+	if got := customImageFor(ApkInfo{Package: "x"}, "vns_plugin.png", list); got != "vns_plugin.png" {
+		t.Errorf("by apk name: %q", got)
+	}
+	if got := customImageFor(ApkInfo{Package: "y"}, "y_app.png", list); got != "" {
+		t.Errorf("none: %q", got)
+	}
+}
+
+func TestCustomImageShortName(t *testing.T) {
+	list := []string{"datasync.png", "MAVSDK-Anafi.PNG", "wind_data.png"}
+	for label, want := range map[string]string{
+		"Data Sync":    "datasync.png",
+		"MAVSDK-Anafi": "MAVSDK-Anafi.PNG",
+		"Wind Data":    "wind_data.png",
+		"VNS":          "",
+	} {
+		if got := customImageFor(ApkInfo{Package: "p", DisplayName: label}, "p_app.png", list); got != want {
+			t.Errorf("%s: got %q, want %q", label, got, want)
+		}
+	}
+	// The apk name and the package name are preferred over the short name
+	list = append(list, "com.atakmap.android.datasync.plugin.png")
+	a := ApkInfo{Package: "com.atakmap.android.datasync.plugin", DisplayName: "Data Sync"}
+	if got := customImageFor(a, "data_sync_plugin.png", list); got != "com.atakmap.android.datasync.plugin.png" {
+		t.Errorf("preference: got %q", got)
+	}
+}
+
+func TestPluginTypeFromPluginAPI(t *testing.T) {
+	for xmlText, want := range map[string]string{
+		`<manifest package="com.beartooth.beartoothtakplugin"><application><meta-data name="plugin-api" value="com.atakmap.app@5.8.0.CIV"></meta-data></application></manifest>`: "plugin",
+		`<manifest package="com.atakmap.app.civ"><application><meta-data name="plugin-api" value="com.atakmap.app@5.8.0.CIV"></meta-data></application></manifest>`:              "app",
+		`<manifest package="com.atakmap.helmcam"><application></application></manifest>`:                                                                                         "app",
+		`<manifest package="com.atakmap.android.vns.plugin"><application></application></manifest>`:                                                                              "app", // no plugin-api: ATAK treats it as an app
+	} {
+		got, err := readParametersFromXML(strings.NewReader(xmlText))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Type != want {
+			t.Errorf("%s: type %q, want %q", got.Package, got.Type, want)
+		}
+	}
+}

@@ -159,7 +159,8 @@ func writeProductInfz(dir string, apkInfos []ApkInfo, imagesDir string, log io.W
 
 // addIcon writes the icon of the apk into the zip as <apk name>.png and sets
 // apkInfo.IconPath to that name. A custom image from imagesDir is used if
-// there is one; otherwise the png icon from the apk; otherwise an empty png.
+// there is one; otherwise the icon of the apk (converted to png if needed);
+// otherwise an empty png.
 func addIcon(zw *zip.Writer, dir string, apkInfo *ApkInfo, imagesDir string, customImagesList []string, log io.Writer) error {
 	iconInApk := apkInfo.IconPath
 	newImageFileName := strings.TrimSuffix(apkInfo.ApkPath, filepath.Ext(apkInfo.ApkPath)) + ".png"
@@ -170,40 +171,30 @@ func addIcon(zw *zip.Writer, dir string, apkInfo *ApkInfo, imagesDir string, cus
 		return fmt.Errorf("error creating icon file into zip: %w", err)
 	}
 
-	// If a custom image is found, use it instead of the image from the apk package
-	if slices.Contains(customImagesList, newImageFileName) {
-		if err := copyFile(fw, filepath.Join(imagesDir, newImageFileName)); err != nil {
+	// If a custom image is found, use it instead of the image from the apk
+	// package. It is named like the apk (vns_plugin.png) or after the
+	// package name (com.atakmap.android.vns.plugin.png).
+	if custom := customImageFor(*apkInfo, newImageFileName, customImagesList); custom != "" {
+		if err := copyFile(fw, filepath.Join(imagesDir, custom)); err != nil {
 			return fmt.Errorf("error copying custom image file: %w", err)
 		}
-		fmt.Fprintln(log, "Using custom image for package", apkInfo.DisplayName, ":", newImageFileName)
+		fmt.Fprintln(log, "Using custom image for package", apkInfo.DisplayName, ":", custom)
 		return nil
-	}
-
-	if !strings.EqualFold(filepath.Ext(iconInApk), ".png") {
-		// TODO Might be possible to convert android webp/xml icons to png with some library
-		fmt.Fprintf(log, "Package %s does not have a png icon file (%s). Creating empty png file...\n", apkInfo.DisplayName, iconInApk)
-		_, err := fw.Write(emptyPng)
-		return err
 	}
 
 	src := apkInfo.srcPath
 	if src == "" {
 		src = filepath.Join(dir, apkInfo.ApkPath)
 	}
-	found, err := copyFileFromZip(fw, src, iconInApk)
+	data, kind, err := apkIcon(src, iconInApk)
 	if err != nil {
-		return fmt.Errorf("error copying icon from %s: %w", apkInfo.ApkPath, err)
+		fmt.Fprintf(log, "No usable icon for %s (%v), using an empty icon\n", apkInfo.DisplayName, err)
+		data = emptyPng
+	} else if kind != "png" {
+		fmt.Fprintf(log, "Icon of %s converted to png from %s\n", apkInfo.DisplayName, kind)
 	}
-	if !found {
-		fmt.Fprintf(log, "Icon %s not found in %s. Creating empty png file...\n", iconInApk, apkInfo.ApkPath)
-		_, err := fw.Write(emptyPng)
-		return err
-	}
-
-	// TODO
-	// Check image size and scale it down if needed to 30% of the original size
-	// Repeat until the image size is e.g. under 50kb
-	return nil
+	_, err = fw.Write(data)
+	return err
 }
 
 func copyFile(w io.Writer, path string) error {
@@ -238,6 +229,51 @@ func copyFileFromZip(w io.Writer, zipPath, name string) (bool, error) {
 		return true, err
 	}
 	return false, nil
+}
+
+// customImageFor returns the custom image for an apk in the images folder,
+// or "". It can be named, in this order of preference:
+//   - like the apk in the update folder: vns_plugin.png
+//   - after the package: com.atakmap.android.vns.plugin.png
+//   - after the app's short name, the label without spaces as in the manual
+//     names: datasync.png for "Data Sync" (case, '-' and '_' are ignored)
+func customImageFor(a ApkInfo, apkImageName string, customImagesList []string) string {
+	for _, name := range []string{apkImageName, a.Package + ".png"} {
+		for _, c := range customImagesList {
+			if strings.EqualFold(c, name) {
+				return c
+			}
+		}
+	}
+	if short := normalizeImageName(shortImageName(a)); short != "" {
+		for _, c := range customImagesList {
+			if normalizeImageName(c) == short {
+				return c
+			}
+		}
+	}
+	return ""
+}
+
+// shortImageName returns the short custom image name of an app,
+// e.g. "datasync.png" for "Data Sync".
+func shortImageName(a ApkInfo) string {
+	if a.DisplayName == "" {
+		return ""
+	}
+	return strings.ToLower(compactName(a.DisplayName)) + ".png"
+}
+
+// normalizeImageName lowercases a file name and removes everything but
+// letters and digits before the extension: "MAVSDK-Anafi.PNG" -> "mavsdkanafi".
+func normalizeImageName(name string) string {
+	name = strings.TrimSuffix(strings.ToLower(name), ".png")
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return r
+		}
+		return -1
+	}, name)
 }
 
 // checkForCustomImages lists the png files in imagesDir (if it exists)
@@ -473,12 +509,6 @@ func readParametersFromXML(reader io.Reader) (ApkInfo, error) {
 		case "manifest":
 			if v, ok := attrValue(se, "package"); ok {
 				apkData.Package = cleanupValue(v)
-				// If the package name ends with .plugin, it is a plugin
-				if strings.HasSuffix(apkData.Package, ".plugin") {
-					apkData.Type = "plugin"
-				} else {
-					apkData.Type = "app"
-				}
 			}
 			if v, ok := attrValue(se, "versionCode"); ok {
 				apkData.Revision = cleanupValue(v)
@@ -519,6 +549,15 @@ func readParametersFromXML(reader io.Reader) (ApkInfo, error) {
 				apkData.Description = cleanupValue(value)
 			}
 		}
+	}
+
+	// As in ATAK (ProductInformation.create): an apk is a plugin if it has
+	// the plugin-api meta-data and is not ATAK itself, which has it too.
+	// The package name does not matter (Beartooth is
+	// com.beartooth.beartoothtakplugin).
+	apkData.Type = "app"
+	if apkData.TakReq != "" && !isAtakApp(apkData.Package) {
+		apkData.Type = "plugin"
 	}
 
 	return apkData, nil

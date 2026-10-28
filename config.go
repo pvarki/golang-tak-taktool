@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -36,11 +39,21 @@ const configFileName = "taktool.yaml"
 //	# (civ-release: also 32-bit devices, bundled apps, but about 3x larger)
 //	atak: small
 //
-//	# Optional. Copy the PDF manuals of the distributed apks into this folder
-//	# (any name, not inside the update folder). allmanuals: true also copies
-//	# the other PDFs found in the apks, with their own names.
-//	manuals: ../manuals
-//	allmanuals: false
+//	# Optional. For 'taktool manuals': copy the PDF manuals of the
+//	# distributed apks into folder (any name, not inside the update folder).
+//	# all: true also copies the other PDFs found in the apks, with their own
+//	# names. withrepo: true also copies them on every 'taktool repo'.
+//	manuals:
+//	  folder: ../manuals
+//	  all: false
+//	  withrepo: false
+//
+//	# Optional. Apks that are never distributed: glob patterns (* and ?,
+//	# case-insensitive) matched against the file names in the apk folder
+//	# and against package names.
+//	exclude:
+//	  - "*UASTool-DIUBLUE*"
+//	  - com.atakmap.android.atakgo.dji
 //
 //	# Optional. The ATAK versions a package is distributed to, instead of the
 //	# version found in the apk: "all", one version or a list of versions.
@@ -48,13 +61,13 @@ const configFileName = "taktool.yaml"
 //	  io.opentakserver.opentakicu: all
 //	  com.example.foo.plugin: [5.7.0, 5.8.0]
 type Config struct {
-	Versions   []string       `yaml:"versions"`
-	Output     string         `yaml:"output"`
-	Packages   []string       `yaml:"packages"`
-	Targets    map[string]any `yaml:"targets"`
-	Atak       string         `yaml:"atak"`
-	Manuals    string         `yaml:"manuals"`
-	AllManuals bool           `yaml:"allmanuals"`
+	Versions []string       `yaml:"versions"`
+	Output   string         `yaml:"output"`
+	Packages []string       `yaml:"packages"`
+	Targets  map[string]any `yaml:"targets"`
+	Atak     string         `yaml:"atak"`
+	Manuals  ManualsConfig  `yaml:"manuals"`
+	Exclude  []string       `yaml:"exclude"`
 
 	// targets resolved to version lists
 	targets map[string][]string
@@ -63,14 +76,24 @@ type Config struct {
 	Dir string `yaml:"-"`
 }
 
+// ManualsConfig is the manuals section of taktool.yaml.
+type ManualsConfig struct {
+	Folder   string `yaml:"folder"`
+	All      bool   `yaml:"all"`
+	WithRepo bool   `yaml:"withrepo"`
+}
+
 func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("%s not found; run 'taktool init' to create it, or give its path with -config", path)
+	}
 	if err != nil {
 		return nil, err
 	}
 	var c Config
 	if err := yaml.UnmarshalWithOptions(data, &c, yaml.DisallowUnknownField()); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, configSyntaxError(path, data, err)
 	}
 
 	abs, err := filepath.Abs(path)
@@ -120,16 +143,24 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: atak: %q, use small or full", path, c.Atak)
 	}
 
-	if c.Manuals != "" {
-		if !filepath.IsAbs(c.Manuals) {
-			c.Manuals = filepath.Join(c.Dir, c.Manuals)
+	if m := &c.Manuals; m.Folder != "" {
+		if !filepath.IsAbs(m.Folder) {
+			m.Folder = filepath.Join(c.Dir, m.Folder)
 		}
-		c.Manuals = filepath.Clean(c.Manuals)
-		if rel, err := filepath.Rel(c.Output, c.Manuals); err == nil && !strings.HasPrefix(rel, "..") {
-			return nil, fmt.Errorf("%s: manuals must not be inside the update folder %s (TAK Server would serve them to every device)", path, c.Output)
+		m.Folder = filepath.Clean(m.Folder)
+		if rel, err := filepath.Rel(c.Output, m.Folder); err == nil && !strings.HasPrefix(rel, "..") {
+			return nil, fmt.Errorf("%s: manuals: folder must not be inside the update folder %s (TAK Server would serve it to every device)", path, c.Output)
 		}
-	} else if c.AllManuals {
-		return nil, fmt.Errorf("%s: allmanuals needs manuals (the folder for the manuals)", path)
+	} else if m.All || m.WithRepo {
+		return nil, fmt.Errorf("%s: manuals: all and withrepo need folder (where the manuals are copied)", path)
+	}
+
+	for i, pattern := range c.Exclude {
+		pattern = strings.ToLower(strings.TrimSpace(pattern))
+		if _, err := pathpkg.Match(pattern, ""); err != nil {
+			return nil, fmt.Errorf("%s: exclude: %q: %w", path, pattern, err)
+		}
+		c.Exclude[i] = pattern
 	}
 
 	c.targets = map[string][]string{}
@@ -192,7 +223,41 @@ func (c *Config) targetVersions(pkg string) ([]string, bool) {
 	return v, ok
 }
 
+// excluded reports whether a file name or package name matches a pattern of
+// exclude, and returns the pattern.
+func (c *Config) excluded(name string) (string, bool) {
+	name = strings.ToLower(name)
+	for _, pattern := range c.Exclude {
+		if ok, _ := pathpkg.Match(pattern, name); ok {
+			return pattern, true
+		}
+	}
+	return "", false
+}
+
 // wantsPackage reports whether the package is distributed.
 func (c *Config) wantsPackage(pkg string) bool {
 	return len(c.Packages) == 0 || slices.Contains(c.Packages, pkg)
 }
+
+// configSyntaxError explains a taktool.yaml that cannot be read and how to
+// fix it.
+func configSyntaxError(path string, data []byte, err error) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s has an error:\n%s\n\n", path, strings.TrimRight(err.Error(), "\n "))
+	if oldManualsRe.Match(data) {
+		b.WriteString("manuals is a group of settings:\n" +
+			"  manuals:\n    folder: ../manuals\n    all: false\n    withrepo: false\n\n")
+	}
+	initCmd := "taktool init"
+	if abs, e := filepath.Abs(path); e == nil && strings.EqualFold(filepath.Base(filepath.Dir(abs)), "apks") {
+		initCmd = "taktool init .." // init creates apks/taktool.yaml in its folder
+	}
+	fmt.Fprintf(&b, "Fix it as in taktool.example.yaml (indent with spaces, not tabs), or rename it\n"+
+		"and create a new one: '%s' (nothing that exists is changed).", initCmd)
+	return errors.New(b.String())
+}
+
+// oldManualsRe matches the forms of the 2.0 test builds, "manuals: <folder>"
+// and "allmanuals:".
+var oldManualsRe = regexp.MustCompile(`(?m)^(manuals:[ \t]*[^\s#]|allmanuals:)`)

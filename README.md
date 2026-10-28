@@ -46,11 +46,15 @@ If you have custom images for the plugins, create images-directory and name like
 ```bash
 Usage:  taktool COMMAND [OPTIONS]
 
-Commands:
-  pluginspackage, pp    Create plugins package
-  datapackage, dp       Create data package
-  repo                  Build the update folder for several ATAK versions (uses taktool.yaml)
-  check                 Check an update folder and show the distributed versions
+Update folder for TAK Server (several ATAK versions, uses taktool.yaml):
+  init                 Create the folders and taktool.yaml
+  repo                 Build the update folder from the apks
+  check                Check an update folder and show what it distributes
+  manuals              Copy the manuals of the distributed apks
+
+Single folder:
+  pluginspackage, pp   Create product.infz for the apks in this folder
+  datapackage, dp      Create a data package of this folder
 
 Run 'taktool COMMAND -h' to see the options of a command.
 ```
@@ -95,7 +99,22 @@ taktool pp
 taktool dp -dbname="Mission 1" -importonreceive
 ```
 
-## Update folder for several ATAK versions (repo, check)
+## Update folder for several ATAK versions (init, repo, check, manuals)
+
+### Quick start
+
+```bash
+taktool init taktool-work         # creates apks/ (taktool.yaml, images/), update/ and manuals/
+cd taktool-work/apks              # put the apks from TAK.gov here
+                                  # edit taktool.yaml: versions, output, exclude ...
+taktool repo -dry-run             # shows what would be done
+taktool repo                      # does it (asks for confirmation)
+taktool check                     # checks the update folder and shows what it distributes
+taktool manuals                   # optional: copies the PDF manuals into manuals/
+```
+
+Then copy the update folder to the server (`/opt/tak/webcontent/update`), or set `output` to it directly.
+`taktool init` never changes anything that exists already.
 
 TAK Server serves the plugin updates from its `update` folder (`/opt/tak/webcontent/update`):
 
@@ -130,6 +149,7 @@ icon `<apk name>.png` for each apk.
 ### repo
 
 Put the new apks (with any file names) and `taktool.yaml` into one folder and run `taktool repo` there.
+[`taktool.example.yaml`](taktool.example.yaml) is a commented template with every option.
 Custom icons go into an `images` folder next to them (`vns_plugin.png` etc.) and are used for every version.
 
 ```yaml
@@ -155,11 +175,17 @@ packages:
 # Which ATAK is distributed: small (default) or full. See "ATAK small and full".
 atak: small
 
-# Optional. Copy the PDF manuals of the distributed apks into this folder
-# (any name, flat, not inside the update folder). See "Manuals".
-manuals: ../manuals
-# Also copy the other PDFs found in the apks, with their own names
-allmanuals: false
+# Optional. For 'taktool manuals'. See "Manuals".
+manuals:
+  folder: ../manuals    # any name, flat, not inside the update folder
+  all: false            # also copy the other PDFs found in the apks
+  withrepo: false       # also copy the manuals on every 'taktool repo'
+
+# Optional. Apks that are never distributed: glob patterns (* and ?,
+# case-insensitive) matched against file names and package names
+exclude:
+  - "*UASTool-DIUBLUE*"
+  - com.atakmap.android.atakgo.dji
 
 # Optional. The ATAK versions a package is distributed to, instead of the
 # version found in the apk: "all", one version or a list of versions.
@@ -173,12 +199,16 @@ change the distribution. If `packages` is given, packages that are not listed ar
 folder.
 
 ```bash
-  -cleansource
+  -clean
         Also remove apks that are certainly not needed from the apk folder (older revisions, copies, Git LFS pointers)
+        (-cleansource is an old name for the same)
+  -cleanall
+        Remove every apk from the apk folder that is not moved into the update folder (also excluded ones and the other ATAK variant)
   -config string
         Configuration file; the apks are read from its folder (default "taktool.yaml")
   -dry-run
         Show what would be done without changing anything
+  -v    Verbose: also show the full summary, every apk left in the apk folder, other PDFs and icon notes
   -yes
         Apply the changes without asking for confirmation (for scripts)
 ```
@@ -190,10 +220,15 @@ What `taktool repo` does:
   (`ATAK-Plugin-vns-4.2-4bb952de-5.6.0-civ-release.apk`). Apps that are not made for a specific ATAK version
   (e.g. OpenTAK ICU) go into every version folder. `targets` in `taktool.yaml` overrides this for a package;
   a plugin whose ATAK version cannot be found is left in the apk folder until it has a target.
+- Apks matching `exclude` stay in the apk folder. Special builds that have the same package name as the normal
+  one (UAS Tool DIU Blue, WAVE Legacy) can only be told apart by file name, so exclude them by file name;
+  otherwise the one with the highest revision would be distributed.
 - Only CIV products are supported. MIL and GOV products are left in the apk folder with a warning.
 - Moves the apks into the version folders. Version folders are updated incrementally: apks already in the
   update folder stay unless a newer revision (versionCode) of the same package replaces them. A warning is shown
   if the new apk is signed with a different certificate than the one it replaces (devices cannot update it).
+- Sets the type (app or plugin) as ATAK does: an apk is a plugin if it has the `plugin-api` meta-data and is not
+  ATAK itself; the package name does not matter (Beartooth's package is `com.beartooth.beartoothtakplugin`).
 - Renames the apks (`vns_plugin.apk`, ...) and writes `product.infz` for each version, like `taktool pp`.
   An existing version folder is also rebuilt when its apks have other names or its `product.infz` differs from
   what taktool would write now (e.g. one written by an older taktool, or with other custom icons).
@@ -202,8 +237,8 @@ What `taktool repo` does:
   `versions`, `repository.inf` and any other files. Hidden files such as `.keep` are kept. To protect against a
   wrong `output`, a non-empty folder without `repositories.inf`, `repository.inf` or version folders is refused.
 - Apks that were not distributed stay in the apk folder, and the report says why (e.g. not in `versions` or
-  `packages`). Add them to `taktool.yaml` or remove them. `-cleansource` removes the ones that are certainly not
-  needed.
+  `packages`). Add them to `taktool.yaml` or remove them. `-clean` removes the ones that are certainly not
+  needed; `-cleanall` removes all of them (only apk files; `taktool.yaml`, `images/` and other files stay).
 
 ### ATAK small and full
 
@@ -227,8 +262,9 @@ ATAK version will probably not be offered the other variant as an update.
 
 ### Manuals
 
-With `manuals` in `taktool.yaml`, `taktool repo` copies the manuals bundled in the distributed apks into that
-folder:
+`taktool manuals` copies the manuals bundled in the apks of the update folder into `manuals: folder:` of
+`taktool.yaml`. Run it in the apk folder after `taktool repo`. With `withrepo: true`, `taktool repo` also does
+it every time. Options: `-dry-run`, `-v` (also lists the other PDFs) and `-config`.
 
 | From | Named |
 |---|---|
@@ -236,11 +272,12 @@ folder:
 | ATAK: `assets/support/docs/*.pdf` | `ATAK 5.8 UserGuide.pdf`, `ATAK 5.8 IconGlossary.pdf` |
 
 The names follow `<Product> <TAK version> <Plugin> <plugin version> <DocType>.pdf`; the plugin name is the
-label without spaces (`Data Sync` -> `DataSync`). A manual is written only if it is missing or its content has
+label without spaces (`Data Sync` -> `DataSync`). An app that is distributed to several ATAK versions as the same
+apk (e.g. HelmCam) gets one manual, named after the highest version. A manual is written only if it is missing or its content has
 changed; nothing is deleted from the folder.
 
 Other PDFs in an apk may be outdated (Data Sync 5.0.2 also bundles the guide of version 3.5), so they are only
-listed in the report. With `allmanuals: true` they are copied too, as `<Plugin> <original name>.pdf`.
+listed with `-v`. With `all: true` they are copied too, as `<Plugin> <original name>.pdf`.
 
 The manuals folder must not be inside the update folder: TAK Server would serve it to every device.
 
@@ -250,21 +287,46 @@ Example report:
 
 ```
 Changes:
-  5.8.0: new version folder, add ATAK 5.8.0.3, add VNS 4.0, add Data Sync 5.0.2, add OpenTAK ICU 1.5.4
-  5.6.0: remove (not in versions)
-  remove repository.inf
 
-Summary:
-  5.7.0: Data Sync 4.0.5, OpenTAK ICU 1.5.4, VNS 4.0
-  5.8.0: ATAK 5.8.0.3, Data Sync 5.0.2, OpenTAK ICU 1.5.4, VNS 4.0
+5.6.0
+  Added:
+    WAVE 2.1
+  Updated:
+    VNS 4.0 -> 4.2
+
+5.8.0 (new version folder)
+  Added:
+    ATAK 5.8.0.5 (small), Data Sync 5.0.2, VNS 4.2
+
+Removed from the update folder:
+    5.5.0 (not in versions), repository.inf
 
 Left in the apk folder:
-  ATAK-Plugin-datasync-3.7.4-5.6.0-civ-release.apk: made for ATAK 5.6.0 (from plugin-api), which is not in versions
-  vns-copy.apk: already in 5.7.0 [-cleansource would remove]
+  ATAK-Plugin-foo-1.0-5.5.0-civ-release.apk: made for ATAK 5.5.0 (from plugin-api), which is not in versions
+  4 apks left as expected (excluded, the other ATAK variant, older or already distributed); -v lists them
 
-Warnings:
-  5.7.0: no ATAK apk
+Icons: 2 images/ files are the same as the apk's own icon and not needed; -v lists them
 ```
+
+By default the report shows only what changes and what needs attention. `-v` also shows the full summary per
+version, every apk left in the apk folder, the other PDFs in the apks and the icon notes. `taktool check` always
+shows the summary.
+
+### Icons
+
+ATAK shows a png icon for each apk in the list of available apps. taktool takes the icon from the apk: a png
+icon as it is, and WebP icons, vector icons, layer lists and adaptive icons converted to a 144x144 png. If an
+icon cannot be read or drawn, the app gets an empty icon.
+
+To use another icon, put a png into an `images` folder in the apk folder, named after the app's short name,
+the label without spaces as in the manual names (`images/datasync.png` for Data Sync; case, `-` and `_` are
+ignored). The package name (`images/com.atakmap.android.datasync.plugin.png`) and the apk name in the update
+folder (`images/data_sync_plugin.png`) also work and take precedence. A custom image is always used instead of
+the apk's icon.
+
+The report says how many apps have no usable icon, how many custom images differ from the apk's own icon (the
+apk's icon may be newer) and how many are the same as it and not needed. `taktool repo -dry-run -v` lists them
+and the icons that were converted.
 
 ### check
 

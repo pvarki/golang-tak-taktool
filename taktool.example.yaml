@@ -1,0 +1,55 @@
+# taktool.yaml for 'taktool repo', 'check' and 'manuals'. 'taktool init'
+# creates it; or copy this file as taktool.yaml into the folder that has the
+# new apks. Edit it and run 'taktool repo -dry-run' there.
+# Relative paths are relative to this file. Folder names are free.
+
+# ATAK versions the server distributes (written to repositories.inf)
+versions:
+  - 5.6.0
+  - 5.7.0
+  - 5.8.0
+
+# The update folder that TAK Server serves (webcontent/update on the server).
+# Default: update
+output: ../update
+
+# Which ATAK is distributed: small (civSmall-release, default) or full
+# (civ-release: also 32-bit devices and bundled apps, about 3x larger)
+atak: small
+
+# Optional. For 'taktool manuals': copy the PDF manuals of the distributed
+# apks into folder (flat, not inside the update folder).
+manuals:
+  folder: ../manuals
+  # also copy the other PDFs found in the apks, with their own names
+  all: false
+  # also copy the manuals on every 'taktool repo'
+  withrepo: false
+
+# Optional. Apks that are never distributed: glob patterns (* and ?,
+# case-insensitive) matched against the file names in this folder and
+# against package names. Excluded apks stay in this folder.
+exclude:
+  # UAS Tool special builds; the normal UAS Tool is distributed. They have
+  # the same package name, so they can only be told apart by file name.
+  - "*UASTool-DIUBLUE*"
+  - "*-LM-I4*"
+  # WAVE Legacy has the same package name as WAVE and a higher revision, so
+  # it would replace WAVE
+  - "*wave-legacy*"
+  # ATAK Go v4 (ATAKGo v5 is distributed)
+  - com.atakmap.android.atakgo.dji
+
+# Optional. If given, only these packages are distributed; other apks stay
+# in this folder and are removed from the update folder.
+# packages:
+#   - com.atakmap.app.civ
+#   - com.atakmap.android.datasync.plugin
+#   - com.atakmap.android.vns.plugin
+
+# Optional. The ATAK versions a package is distributed to, instead of the
+# version found in the apk: "all", one version or a list of versions. Apps
+# that are not made for an ATAK version (e.g. OpenTAK ICU, ATAKGo v5) go to
+# all versions anyway.
+# targets:
+#   com.example.foo.plugin: [5.7.0, 5.8.0]

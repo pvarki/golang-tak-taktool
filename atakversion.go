@@ -17,8 +17,9 @@ var (
 	// ATAK's own versionName, e.g. "5.8.0.3 (4f67063)[playstore]"
 	leadingVersionRe = regexp.MustCompile(`^(\d+\.\d+\.\d+)`)
 	// ATAK version followed by the flavor in a file name,
-	// e.g. "ATAK-Plugin-vns-4.2-4bb952de-5.6.0-civ-release.apk"
-	fileVersionRe = regexp.MustCompile(`(?i)(?:^|[-_ .])(\d+\.\d+\.\d+)[-_ .](civ|mil|gov)(?:[-_ .]|$)`)
+	// e.g. "ATAK-Plugin-vns-4.2-4bb952de-5.6.0-civ-release.apk". The version
+	// must not be the end of a longer number ("ATAKGo-4.18.0.190-CIV").
+	fileVersionRe = regexp.MustCompile(`(?i)(?:^|[-_ ])(\d+\.\d+\.\d+)[-_ .](civ|mil|gov)(?:[-_ .]|$)`)
 	// Flavor as a separate word in a file name, e.g. "atak-mil-release.apk"
 	fileFlavorRe = regexp.MustCompile(`(?i)(?:^|[-_ .])(civ|mil|gov)(?:[-_ .]|$)`)
 	versionRe    = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
@@ -32,8 +33,14 @@ type atakTarget struct {
 }
 
 // isAtakApp reports whether the package is ATAK itself (e.g. com.atakmap.app.civ).
+// System plugins such as com.atakmap.app.flavor.* and
+// com.atakmap.app.encryption.* are not ATAK itself.
 func isAtakApp(pkg string) bool {
-	return pkg == "com.atakmap.app" || strings.HasPrefix(pkg, "com.atakmap.app.")
+	if pkg == "com.atakmap.app" {
+		return true
+	}
+	rest, ok := strings.CutPrefix(pkg, "com.atakmap.app.")
+	return ok && rest != "" && !strings.Contains(rest, ".")
 }
 
 // detectAtakTarget finds the ATAK version an apk is made for, in this order:
