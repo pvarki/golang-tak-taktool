@@ -248,7 +248,9 @@ func TestCheckRepository(t *testing.T) {
 	if want := []string{"ATAK 5.8.0.3", "Data Sync 5.0.2", "VNS 4.0"}; r.summary[0].version != "5.8.0" || !slices.Equal(r.summary[0].apps, want) {
 		t.Errorf("summary %+v, want 5.8.0 %v", r.summary[0], want)
 	}
-	if !slices.ContainsFunc(r.warnings, func(s string) bool { return s == "5.9.0: no Data Sync (com.atakmap.android.datasync.plugin); it is in 5.8.0" }) {
+	if !slices.ContainsFunc(r.warnings, func(s string) bool {
+		return s == "5.9.0: no Data Sync (com.atakmap.android.datasync.plugin); it is in 5.8.0"
+	}) {
 		t.Errorf("missing Data Sync in 5.9.0 not reported: %v", r.warnings)
 	}
 
