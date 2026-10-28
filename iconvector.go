@@ -6,10 +6,9 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
-
-	"golang.org/x/image/vector"
 )
 
 type mat [6]float64 // a b c d e f: x' = a*x + c*y + e, y' = b*x + d*y + f
@@ -25,6 +24,7 @@ func (m mat) apply(x, y float64) (float32, float32) {
 	return float32(m[0]*x + m[2]*y + m[4]), float32(m[1]*x + m[3]*y + m[5])
 }
 
+// attr returns the value of the attribute with the given local name.
 func attr(se xml.StartElement, name string) (string, bool) {
 	for _, a := range se.Attr {
 		if a.Name.Local == name {
@@ -61,20 +61,45 @@ func parseColor(v string) (color.NRGBA, bool) {
 	}
 	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 		u := uint32(n)
+		// apkparser writes a theme attribute (?attr/colorControlNormal) as
+		// its resource id in decimal, too: 0x0101xxxx for Android's own
+		// attributes, 0x7fTTxxxx for the app's (TT is the type, a small
+		// number). Such a colour cannot be resolved without the theme. A real
+		// colour that looks the same (alpha 0x7f with very little red) is
+		// not drawn; that is the price of the guess.
+		if u>>16 == 0x0101 || (u>>24 == 0x7f && (u>>16)&0xff >= 0x01 && (u>>16)&0xff <= 0x0f) {
+			return color.NRGBA{}, false
+		}
 		return color.NRGBA{uint8(u >> 16), uint8(u >> 8), uint8(u), uint8(u >> 24)}, true
 	}
 	return color.NRGBA{}, false
 }
 
 // renderVector draws an Android VectorDrawable (as decoded XML) into a
-// size x size image. Fills are supported, strokes and clip paths are not.
+// size x size image: fills (nonZero and evenOdd) and strokes. Clip paths and
+// gradients are not drawn.
 func renderVector(src string, size int) (*image.NRGBA, error) {
+	img, _, err := renderVectorNotes(src, size)
+	return img, err
+}
+
+// renderVectorNotes is renderVector that also returns what of the drawable
+// could not be drawn (e.g. "strokes"), so the report can say the icon may
+// look different in ATAK.
+func renderVectorNotes(src string, size int) (*image.NRGBA, []string, error) {
+	var notes []string
+	note := func(s string) {
+		if !slices.Contains(notes, s) {
+			notes = append(notes, s)
+		}
+	}
 	dec := xml.NewDecoder(strings.NewReader(src))
 	dst := image.NewNRGBA(image.Rect(0, 0, size, size))
 	var stack []mat
 	var cur mat
 	var tint color.NRGBA
 	hasTint := false
+	alpha := 1.0
 	for {
 		tok, err := dec.Token()
 		if err != nil {
@@ -83,13 +108,18 @@ func renderVector(src string, size int) (*image.NRGBA, error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			switch t.Name.Local {
+			case "clip-path":
+				note("clip paths")
 			case "vector":
 				vw, vh := fattr(t, "viewportWidth", 24), fattr(t, "viewportHeight", 24)
 				if vw <= 0 || vh <= 0 {
-					return nil, fmt.Errorf("bad viewport")
+					return nil, nil, fmt.Errorf("bad viewport")
 				}
+				alpha = math.Max(0, math.Min(1, fattr(t, "alpha", 1)))
 				if tc, ok := attr(t, "tint"); ok {
-					tint, hasTint = parseColor(tc)
+					if tint, hasTint = parseColor(tc); !hasTint {
+						note("a tint colour that could not be resolved")
+					}
 				}
 				s := float64(size) / math.Max(vw, vh)
 				cur = mat{s, 0, 0, s, (float64(size) - vw*s) / 2, (float64(size) - vh*s) / 2}
@@ -107,22 +137,42 @@ func renderVector(src string, size int) (*image.NRGBA, error) {
 				cur = g.mul(cur)
 			case "path":
 				d, _ := attr(t, "pathData")
-				fc, _ := attr(t, "fillColor")
-				c, ok := parseColor(fc)
-				if !ok || c.A == 0 {
-					continue
+				var f flattener
+				if err := tracePath(&f, d, cur); err != nil {
+					return nil, nil, err
 				}
-				c.A = uint8(float64(c.A) * fattr(t, "fillAlpha", 1))
-				r := vector.NewRasterizer(size, size)
-				if err := tracePath(r, d, cur); err != nil {
-					return nil, err
+				// Fill
+				fc, hasFill := attr(t, "fillColor")
+				if c, ok := parseColor(fc); ok && c.A > 0 {
+					c.A = uint8(float64(c.A) * math.Max(0, math.Min(1, fattr(t, "fillAlpha", 1))))
+					ft, _ := attr(t, "fillType")
+					fillPolygons(dst, f.polygons(), c, ft == "1" || ft == "evenOdd")
+				} else if hasFill && !ok {
+					note("gradients or colours that could not be resolved")
 				}
-				r.Draw(dst, dst.Bounds(), image.NewUniform(c), image.Point{})
+				// Stroke, drawn over the fill as on Android
+				sc, hasStroke := attr(t, "strokeColor")
+				if w := fattr(t, "strokeWidth", 0); w > 0 && hasStroke {
+					if c, ok := parseColor(sc); ok && c.A > 0 {
+						c.A = uint8(float64(c.A) * math.Max(0, math.Min(1, fattr(t, "strokeAlpha", 1))))
+						scale := math.Sqrt(math.Abs(cur[0]*cur[3] - cur[1]*cur[2]))
+						capName := map[string]string{"1": "round", "2": "square", "round": "round", "square": "square"}
+						lc, _ := attr(t, "strokeLineCap")
+						fillPolygons(dst, strokePolygons(f.paths, w*scale, capName[lc]), c, false)
+					} else if !ok {
+						note("gradients or colours that could not be resolved")
+					}
+				}
 			}
 		case xml.EndElement:
 			if t.Name.Local == "group" && len(stack) > 0 {
 				cur, stack = stack[len(stack)-1], stack[:len(stack)-1]
 			}
+		}
+	}
+	if alpha < 1 {
+		for i := 3; i < len(dst.Pix); i += 4 {
+			dst.Pix[i] = uint8(float64(dst.Pix[i]) * alpha)
 		}
 	}
 	if hasTint {
@@ -132,19 +182,25 @@ func renderVector(src string, size int) (*image.NRGBA, error) {
 			dst.Pix[i+3] = uint8(int(dst.Pix[i+3]) * int(tint.A) / 255)
 		}
 	}
-	return dst, nil
+	return dst, notes, nil
 }
 
-// tracePath feeds SVG path data to the rasterizer.
-func tracePath(r *vector.Rasterizer, d string, m mat) error {
+// pathSink receives a path: subpaths of lines and cubic curves. A subpath
+// is closed only by ClosePath.
+type pathSink interface {
+	MoveTo(x, y float32)
+	LineTo(x, y float32)
+	CubeTo(x1, y1, x2, y2, x, y float32)
+	ClosePath()
+}
+
+// tracePath feeds SVG path data, transformed by m, to r.
+func tracePath(r pathSink, d string, m mat) error {
 	p := pathLexer{s: d}
 	var cx, cy, sx, sy, lcx, lcy float64 // current, subpath start, last control
 	var lastCmd byte
 	open := false
 	move := func(x, y float64) {
-		if open {
-			r.ClosePath()
-		}
 		r.MoveTo(m.apply(x, y))
 		open = true
 	}
@@ -296,9 +352,6 @@ func tracePath(r *vector.Rasterizer, d string, m mat) error {
 			return fmt.Errorf("unknown path command %q", cmd)
 		}
 		lastCmd = cmd
-	}
-	if open {
-		r.ClosePath()
 	}
 	return nil
 }

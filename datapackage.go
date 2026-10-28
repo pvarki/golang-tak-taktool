@@ -64,7 +64,7 @@ func PackageDataPackage(uid, name, fileExtension string, onReceiveDelete, onRece
 	// Collect files recursively. The package being created (and its temporary
 	// file) is skipped, so that a previous run's package is not put inside the
 	// new one.
-	files, err := collectFiles(".", dataPackageName, dataPackageName+".tmp")
+	files, err := collectFiles(".", "."+removeFirstDotIfPresent(fileExtension), dataPackageName, dataPackageName+".tmp")
 	if err != nil {
 		return fmt.Errorf("error reading directory: %w", err)
 	}
@@ -81,21 +81,38 @@ func PackageDataPackage(uid, name, fileExtension string, onReceiveDelete, onRece
 }
 
 // collectFiles returns the regular files under root as slash separated paths
-// relative to root, sorted. Files in root named in exclude are left out.
-func collectFiles(root string, exclude ...string) ([]string, error) {
+// relative to root, sorted. Left out are: files in root named in exclude,
+// data packages in root with the extension packageExt (packages of earlier
+// runs; other zips are packed),
+// hidden files and folders (.git, .DS_Store) and Windows' Thumbs.db and
+// desktop.ini.
+func collectFiles(root, packageExt string, exclude ...string) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
+		if rel != "." && (strings.HasPrefix(d.Name(), ".") ||
+			strings.EqualFold(d.Name(), "Thumbs.db") || strings.EqualFold(d.Name(), "desktop.ini")) {
+			fmt.Println("Skipping (hidden or system file):", filepath.ToSlash(rel))
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
 		if slices.Contains(exclude, rel) {
+			return nil
+		}
+		if packageExt != "" && !strings.ContainsRune(rel, filepath.Separator) && strings.EqualFold(filepath.Ext(rel), packageExt) &&
+			isDataPackage(path) {
+			fmt.Println("Skipping (an earlier data package):", rel)
 			return nil
 		}
 
@@ -224,4 +241,20 @@ func buildManifest(manifest Manifest) (string, error) {
 
 func removeFirstDotIfPresent(s string) string {
 	return strings.TrimPrefix(s, ".")
+}
+
+// isDataPackage reports whether the file is a zip with MANIFEST/manifest.xml,
+// i.e. a TAK data package.
+func isDataPackage(path string) bool {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return false
+	}
+	defer zr.Close()
+	for _, f := range zr.File {
+		if strings.EqualFold(f.Name, "MANIFEST/manifest.xml") {
+			return true
+		}
+	}
+	return false
 }

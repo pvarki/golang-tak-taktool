@@ -7,8 +7,8 @@
 
 ## Notes and limitations
 - The tool has been tested with limited data. No 100% functionality is guaranteed.
-- The tool cannot convert APK file XML icons to PNG format and replace them with a blank image.
-- The tool does not consider the icon size and copies it as is.
+- Png icons are copied as they are. WebP, vector, layer list and adaptive icons are converted to a 144x144 png;
+  clip paths and gradients of vector icons are not drawn. See "Icons".
 
 ## Build and install
 
@@ -56,8 +56,12 @@ Single folder:
   pluginspackage, pp   Create product.infz for the apks in this folder
   datapackage, dp      Create a data package of this folder
 
-Run 'taktool COMMAND -h' to see the options of a command.
+Run 'taktool COMMAND -h' to see the options of a command,
+and 'taktool version' to see the version.
 ```
+
+`taktool version` shows the version and the Git commit the binary was built from, e.g.
+`taktool 2.0.0-dev (commit 1a2b3c4 2026-10-28, windows/amd64)`.
 
 ### pluginspackage (pp)
 
@@ -90,7 +94,9 @@ meets it, yellow if not); it does not block installing. It is 1 if the apk has n
         Set data package "onReceiveImport" to import the package after receive
 ```
 
-All files in the current directory and its subdirectories are packed, except the package being created.
+All files in the current directory and its subdirectories are packed, except the package being created, earlier
+packages with the same extension in the current directory, hidden files and folders (`.git`, `.DS_Store`) and
+`Thumbs.db`/`desktop.ini`.
 
 Examples:
 
@@ -113,8 +119,8 @@ taktool check                     # checks the update folder and shows what it d
 taktool manuals                   # optional: copies the PDF manuals into manuals/
 ```
 
-Then copy the update folder to the server (`/opt/tak/webcontent/update`), or set `output` to it directly.
-`taktool init` never changes anything that exists already.
+Then copy the update folder to the server (see "Copying to the server"), or set `output` to the server's
+folder directly. `taktool init` never changes anything that exists already.
 
 TAK Server serves the plugin updates from its `update` folder (`/opt/tak/webcontent/update`):
 
@@ -149,50 +155,9 @@ icon `<apk name>.png` for each apk.
 ### repo
 
 Put the new apks (with any file names) and `taktool.yaml` into one folder and run `taktool repo` there.
-[`taktool.example.yaml`](taktool.example.yaml) is a commented template with every option.
-Custom icons go into an `images` folder next to them (`vns_plugin.png` etc.) and are used for every version.
-
-```yaml
-# taktool.yaml
-# ATAK versions the server distributes (written to repositories.inf)
-versions:
-  - 5.6.0
-  - 5.7.0
-  - 5.8.0
-
-# The update folder (any name). Relative paths are relative to this file.
-# Default: update
-output: /opt/tak/webcontent/update
-
-# Optional. If given, only these packages are distributed; other apks are
-# left in the apk folder. Without it every apk is distributed.
-packages:
-  - com.atakmap.app.civ
-  - com.atakmap.android.datasync.plugin
-  - com.atakmap.android.vns.plugin
-  - io.opentakserver.opentakicu
-
-# Which ATAK is distributed: small (default) or full. See "ATAK small and full".
-atak: small
-
-# Optional. For 'taktool manuals'. See "Manuals".
-manuals:
-  folder: ../manuals    # any name, flat, not inside the update folder
-  all: false            # also copy the other PDFs found in the apks
-  withrepo: false       # also copy the manuals on every 'taktool repo'
-
-# Optional. Apks that are never distributed: glob patterns (* and ?,
-# case-insensitive) matched against file names and package names
-exclude:
-  - "*UASTool-DIUBLUE*"
-  - com.atakmap.android.atakgo.dji
-
-# Optional. The ATAK versions a package is distributed to, instead of the
-# version found in the apk: "all", one version or a list of versions.
-targets:
-  io.opentakserver.opentakicu: all
-  com.example.foo.plugin: [5.7.0, 5.8.0]
-```
+[`taktool.example.yaml`](taktool.example.yaml) describes every setting (`versions`, `output`, `atak`,
+`manuals`, `exclude`, `packages`, `targets`); `taktool init` writes it as `taktool.yaml`. Lines starting with
+`#` are comments. Custom icons go into an `images` folder next to the apks (see "Icons").
 
 `taktool.yaml` is kept in the apk folder and is the description of what the server distributes: change it to
 change the distribution. If `packages` is given, packages that are not listed are also removed from the update
@@ -200,10 +165,9 @@ folder.
 
 ```bash
   -clean
-        Also remove apks that are certainly not needed from the apk folder (older revisions, copies, Git LFS pointers)
-        (-cleansource is an old name for the same)
+        Also remove apks that are certainly not needed from the apk folder and apks/removed/ (copies of distributed apks, replaced apks in apks/removed/, Git LFS pointers)
   -cleanall
-        Remove every apk from the apk folder that is not moved into the update folder (also excluded ones and the other ATAK variant)
+        Remove every apk from the apk folder and apks/removed/ that is not moved into the update folder (also excluded ones and the other ATAK variant)
   -config string
         Configuration file; the apks are read from its folder (default "taktool.yaml")
   -dry-run
@@ -222,23 +186,74 @@ What `taktool repo` does:
   a plugin whose ATAK version cannot be found is left in the apk folder until it has a target.
 - Apks matching `exclude` stay in the apk folder. Special builds that have the same package name as the normal
   one (UAS Tool DIU Blue, WAVE Legacy) can only be told apart by file name, so exclude them by file name;
-  otherwise the one with the highest revision would be distributed.
+  otherwise the one with the highest revision would be distributed. A file name pattern only matches the files
+  in the apk folder: if the special build is in the update folder already (renamed to `wave_plugin.apk`),
+  delete it from the version folder and run `taktool repo` again, so the normal build goes in. Until then the
+  normal build stays in the apk folder ("older than WAVE ... in 5.8.0"), and `-clean` does not remove it.
 - Only CIV products are supported. MIL and GOV products are left in the apk folder with a warning.
+- Plugins that still use the package name of ATAK's plugin template (`com.atakmap.android.plugintemplate.plugin`)
+  or sample plugin (`com.atakmap.android.helloworld.plugin`) are not distributed, with a warning: ATAK cannot tell
+  them from other plugins built from the same template and would replace one with another. One already in the
+  update folder is moved to `removed/`.
 - Moves the apks into the version folders. Version folders are updated incrementally: apks already in the
   update folder stay unless a newer revision (versionCode) of the same package replaces them. A warning is shown
   if the new apk is signed with a different certificate than the one it replaces (devices cannot update it).
+- Apks that leave the update folder (replaced by a newer revision, or no longer wanted because of `packages`,
+  `exclude`, `targets` or `atak`) are not deleted but moved to `removed/` in the apk folder, named after the
+  version they came from (`removed/5.6.0-vns_plugin.apk`). `-clean` deletes the ones there that are certainly
+  not needed: the same apk is distributed, or a newer revision of the package, signed with the same
+  certificate, is distributed for the same ATAK version (a newer VNS for 5.8.0 does not replace VNS for 5.7.0).
+  The report names each of them with both versionNames before asking (`5.8.0-wave_plugin.apk: WAVE 2.1
+  (revision 3), replaced by WAVE 2.0-legacy (revision 5) in 5.8.0`), so check the list. Apks moved there by a
+  run are deleted only by a later run. `-cleanall` deletes all of them, also listed by name. To get an apk
+  back, move it from `removed/` into the apk folder (any name) and run `taktool repo`.
+- If an apk in the update folder cannot be read, nothing is changed: it may be a temporary problem (network
+  drive, a cloud file that is not downloaded).
 - Sets the type (app or plugin) as ATAK does: an apk is a plugin if it has the `plugin-api` meta-data and is not
   ATAK itself; the package name does not matter (Beartooth's package is `com.beartooth.beartoothtakplugin`).
 - Renames the apks (`vns_plugin.apk`, ...) and writes `product.infz` for each version, like `taktool pp`.
   An existing version folder is also rebuilt when its apks have other names or its `product.infz` differs from
   what taktool would write now (e.g. one written by an older taktool, or with other custom icons).
-- Builds each version folder in a temporary folder and swaps it in place when it is complete.
-- Writes `repositories.inf` and **deletes everything else** in the update folder: version folders not in
-  `versions`, `repository.inf` and any other files. Hidden files such as `.keep` are kept. To protect against a
-  wrong `output`, a non-empty folder without `repositories.inf`, `repository.inf` or version folders is refused.
+- Builds each version folder in a temporary folder (`.5.8.0.tmp`) and swaps it in place when it is complete; the
+  old folder is kept as `.5.8.0.old` until then. If a run is interrupted, the next run restores the version
+  folder from `.5.8.0.old`.
+- Writes `repositories.inf` and **removes everything else** from the update folder: apks in other folders (e.g.
+  version folders not in `versions`) and loose apks go to `removed/`, other files such as `repository.inf` are
+  deleted. Hidden files such as `.keep` are kept. To
+  protect against a wrong `output`, a non-empty folder without `repositories.inf`, `repository.inf` or a version
+  folder with `product.infz` is refused.
 - Apks that were not distributed stay in the apk folder, and the report says why (e.g. not in `versions` or
   `packages`). Add them to `taktool.yaml` or remove them. `-clean` removes the ones that are certainly not
-  needed; `-cleanall` removes all of them (only apk files; `taktool.yaml`, `images/` and other files stay).
+  needed: copies of a distributed apk or of another apk in the apk folder, and Git LFS pointers. Older
+  revisions are not removed, as the newer one may be a special build that should be excluded (see `exclude`).
+  `-cleanall` removes all of them (only apk files; `taktool.yaml`, `images/` and other files stay).
+- If the newest revision of a package has two apks with different content, neither is distributed, and `-clean`
+  leaves the other apks of the package alone (also in `removed/`) until you remove the wrong one.
+
+### Copying to the server
+
+TAK Server serves `/opt/tak/webcontent/update`. Copy the update folder there so that files that are no longer
+in it are deleted on the server too; otherwise ATAK may still see an old version folder:
+
+```bash
+rsync -av --delete update/ user@server:/opt/tak/webcontent/update/
+```
+
+On Windows, WinSCP's *Synchronize* (remote, with *Delete files*) does the same. Then run `taktool check` in
+`/opt/tak/webcontent` on the server (or `taktool check /opt/tak/webcontent/update`) to check that the copy is
+complete: it checks the size and SHA-256 of every apk.
+
+### Speed and the apk cache
+
+Reading an apk means computing the SHA-256 of the whole file for product.inf, which takes a while for apks of
+hundreds of megabytes. taktool reads each file once per run (an apk in several version folders is the same file)
+and remembers what it read between runs in `taktool/apk-cache.json` in the user's cache folder
+(`%LocalAppData%` on Windows, `~/.cache` on Linux). A file is recognised by its size, modification time and
+the SHA-256 of its first and last 64 KiB, so a moved or renamed apk is not read again, but a changed one is.
+(A file changed in the middle with its modification time kept, e.g. copied over with `robocopy`, is not noticed
+by `repo`; `check` finds it.) The cache is only used by the taktool build that wrote it.
+`taktool check` always computes the SHA-256 of every apk, because that is what it checks.
+`TAKTOOL_CACHE=off` disables the cache file, `TAKTOOL_CACHE=<folder>` keeps it in another folder.
 
 ### ATAK small and full
 
@@ -298,14 +313,19 @@ Changes:
   Added:
     ATAK 5.8.0.5 (small), Data Sync 5.0.2, VNS 4.2
 
-Removed from the update folder:
+Removed from the update folder (apks go to the removed folder, other files are deleted):
     5.5.0 (not in versions), repository.inf
 
-Left in the apk folder:
-  ATAK-Plugin-foo-1.0-5.5.0-civ-release.apk: made for ATAK 5.5.0 (from plugin-api), which is not in versions
-  4 apks left as expected (excluded, the other ATAK variant, older or already distributed); -v lists them
+Removed and replaced apks are moved to apks/removed/.
 
-Icons: 2 images/ files are the same as the apk's own icon and not needed; -v lists them
+Left in the apk folder (-v lists them):
+  ATAK-Plugin-foo-1.0-civ-release.apk: ATAK version not found in the apk or its file name; set it under targets in taktool.yaml (com.example.foo.plugin: [5.8.0])
+  3 for ATAK versions not in versions (5.4.0: 1, 5.5.0: 2)
+  4 left on purpose or not needed (excluded, other ATAK variant, older, copies); -clean would remove 2
+
+apks/removed/: 3 apks taken out of the update folder; -clean removes the ones that are not needed, -cleanall all
+
+Icons: 1 apps without an icon (empty in ATAK), 2 images/ files not needed; -v lists them
 ```
 
 By default the report shows only what changes and what needs attention. `-v` also shows the full summary per
@@ -323,6 +343,10 @@ the label without spaces as in the manual names (`images/datasync.png` for Data 
 ignored). The package name (`images/com.atakmap.android.datasync.plugin.png`) and the apk name in the update
 folder (`images/data_sync_plugin.png`) also work and take precedence. A custom image is always used instead of
 the apk's icon.
+
+taktool draws the fills (nonZero and evenOdd) and strokes of vector icons, but not clip paths or gradients;
+the report lists the icons that have them, as they may look different in ATAK than the installed app (a custom
+image replaces such an icon). Strokes always get round joins.
 
 The report says how many apps have no usable icon, how many custom images differ from the apk's own icon (the
 apk's icon may be newer) and how many are the same as it and not needed. `taktool repo -dry-run -v` lists them

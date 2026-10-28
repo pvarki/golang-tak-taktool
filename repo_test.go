@@ -85,7 +85,7 @@ func TestLoadConfig(t *testing.T) {
 	if !slices.Equal(c.Versions, []string{"5.6.0", "5.8.0"}) {
 		t.Errorf("versions %v", c.Versions)
 	}
-	if c.Output != filepath.Join(dir, "update") {
+	if c.Output != filepath.Join(filepath.Dir(dir), "update") {
 		t.Errorf("default output %q", c.Output)
 	}
 	if !c.wantsPackage("a.b") || c.wantsPackage("c.d") {
@@ -125,9 +125,16 @@ func TestCheckOutputFolder(t *testing.T) {
 		setup  func(out string)
 		ok     bool
 	}{
-		"new folder":            {filepath.Join(base, "update"), func(string) {}, true},
-		"empty folder":          {filepath.Join(base, "empty"), func(o string) { os.Mkdir(o, 0o755) }, true},
-		"existing update":       {filepath.Join(base, "upd"), func(o string) { os.MkdirAll(filepath.Join(o, "5.8.0"), 0o755) }, true},
+		"new folder":   {filepath.Join(base, "update"), func(string) {}, true},
+		"empty folder": {filepath.Join(base, "empty"), func(o string) { os.Mkdir(o, 0o755) }, true},
+		"existing update": {filepath.Join(base, "upd"), func(o string) {
+			os.MkdirAll(filepath.Join(o, "5.8.0"), 0o755)
+			os.WriteFile(filepath.Join(o, "5.8.0", productInfzFilename), nil, 0o644)
+		}, true},
+		"only a version-like folder": {filepath.Join(base, "photos"), func(o string) {
+			os.MkdirAll(filepath.Join(o, "1.2.3"), 0o755)
+			os.WriteFile(filepath.Join(o, "x.jpg"), nil, 0o644)
+		}, false},
 		"same as apk folder":    {src, func(string) {}, false},
 		"parent of apk folder":  {base, func(string) {}, false},
 		"unrelated full folder": {filepath.Join(base, "home"), func(o string) { os.Mkdir(o, 0o755); os.WriteFile(filepath.Join(o, "x.txt"), nil, 0o644) }, false},
@@ -172,7 +179,7 @@ func TestPlanAndExecuteCleanup(t *testing.T) {
 		}
 	}
 
-	if err := executeRepoPlan(plan, cleanNone, io.Discard); err != nil {
+	if _, err := executeRepoPlan(plan, cleanNone, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := filesIn(t, out), []string{".keep", "5.8.0", "5.9.0", "repositories.inf"}; !slices.Equal(got, want) {
@@ -249,7 +256,7 @@ func TestCheckRepository(t *testing.T) {
 		t.Errorf("summary %+v, want 5.8.0 %v", r.summary[0], want)
 	}
 	if !slices.ContainsFunc(r.warnings, func(s string) bool {
-		return s == "5.9.0: no Data Sync (com.atakmap.android.datasync.plugin); it is in 5.8.0"
+		return s == "Data Sync (com.atakmap.android.datasync.plugin): not in 5.9.0; it is in 5.8.0"
 	}) {
 		t.Errorf("missing Data Sync in 5.9.0 not reported: %v", r.warnings)
 	}
@@ -270,13 +277,13 @@ func TestCheckRepository(t *testing.T) {
 		"5.9.0/vns_plugin.apk: sha256",
 		"5.9.0/extra.apk is not listed",
 		"folder 5.5.0 is not listed",
-		"5.8.0: no com.example.missing.plugin (com.example.missing.plugin)",
+		"com.example.missing.plugin: not in any version",
 	} {
 		if !strings.Contains(joined, s) {
 			t.Errorf("not reported: %q\n%s", s, joined)
 		}
 	}
-	if strings.Contains(joined, "no Data Sync (com.atakmap.android.datasync.plugin)") {
+	if strings.Contains(joined, "Data Sync (com.atakmap.android.datasync.plugin): not in") {
 		t.Error("with packages in taktool.yaml, only those packages should be required")
 	}
 	if len(r.errors) != 2 {
@@ -326,6 +333,7 @@ func TestRepoAsksForConfirmation(t *testing.T) {
 	out := filepath.Join(base, "update")
 	os.Mkdir(src, 0o755)
 	os.MkdirAll(filepath.Join(out, "5.5.0"), 0o755)
+	os.WriteFile(filepath.Join(out, "5.5.0", productInfzFilename), nil, 0o644)
 	cfgPath := writeConfig(t, src, "versions: [5.8.0]\noutput: ../update\n")
 	opts := repoOptions{config: cfgPath}
 
@@ -586,7 +594,7 @@ func TestRepoCleanOnly(t *testing.T) {
 	ptr := filepath.Join(src, "ptr.apk")
 	os.WriteFile(ptr, []byte("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 1\n"), 0o644)
 	var report bytes.Buffer
-	if err := PackageRepository(repoOptions{config: cfgPath, cleanSource: true}, strings.NewReader("y\n"), &report); err != nil {
+	if err := PackageRepository(repoOptions{config: cfgPath, clean: true}, strings.NewReader("y\n"), &report); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"The update folder is up to date. Remove 1 apks", "Removed 1 apks"} {
@@ -612,7 +620,7 @@ func TestRepoCleanAll(t *testing.T) {
 	os.WriteFile(filepath.Join(src, "notes.txt"), []byte("x"), 0o644)
 
 	// -clean removes only the LFS pointer
-	if err := PackageRepository(repoOptions{config: cfgPath, cleanSource: true, yes: true}, strings.NewReader(""), io.Discard); err != nil {
+	if err := PackageRepository(repoOptions{config: cfgPath, clean: true, yes: true}, strings.NewReader(""), io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if got := filesIn(t, src); !slices.Equal(got, []string{"notes.txt", configFileName, "wave-legacy.apk"}) {

@@ -61,10 +61,18 @@ func signingCerts(path string) ([]string, error) {
 // installs an update over an existing app if it is signed with the same
 // certificate. It returns false if either apk cannot be read.
 func signersDiffer(pathA, pathB string) bool {
-	a, errA := signingCerts(pathA)
-	b, errB := signingCerts(pathB)
+	a, errA := cachedSigningCerts(pathA)
+	b, errB := cachedSigningCerts(pathB)
 	if errA != nil || errB != nil || len(a) == 0 || len(b) == 0 {
 		return false
 	}
 	return !slices.Equal(a, b)
+}
+
+// sameSigner reports whether two apks are signed with the same certificates
+// (false if either cannot be read).
+func sameSigner(pathA, pathB string) bool {
+	a, errA := cachedSigningCerts(pathA)
+	b, errB := cachedSigningCerts(pathB)
+	return errA == nil && errB == nil && len(a) > 0 && slices.Equal(a, b)
 }

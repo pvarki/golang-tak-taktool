@@ -21,12 +21,15 @@ Single folder:
   pluginspackage, pp   Create product.infz for the apks in this folder
   datapackage, dp      Create a data package of this folder
 
-Run 'taktool COMMAND -h' to see the options of a command.
+Run 'taktool COMMAND -h' to see the options of a command,
+and 'taktool version' to see the version.
 `)
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	code := run(os.Args[1:], os.Stdout, os.Stderr)
+	saveApkCache()
+	os.Exit(code)
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -80,7 +83,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return flagErrorCode(err)
 		}
-		if err := PackageManuals(opts, stdout); err != nil {
+		if err := CopyManuals(opts, stdout); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
@@ -106,6 +109,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
+	case "version", "-version", "--version":
+		fmt.Fprintln(stdout, versionString())
 	case "-h", "-help", "--help", "help":
 		usage(stdout)
 	default:
@@ -127,7 +132,7 @@ func splitCommand(args []string) (string, []string) {
 			rest := append(append([]string{}, args[:i]...), args[i+1:]...)
 			return a, rest
 		}
-		if a == "-h" || a == "-help" || a == "--help" {
+		if a == "-h" || a == "-help" || a == "--help" || a == "-version" || a == "--version" {
 			return a, nil
 		}
 	}
@@ -198,11 +203,10 @@ func parseRepoFlags(args []string, out io.Writer) (repoOptions, error) {
 	fs.SetOutput(out)
 	fs.StringVar(&o.config, "config", configFileName, "Configuration file; the apks are read from its folder")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "Show what would be done without changing anything")
-	fs.BoolVar(&o.cleanSource, "clean", false,
-		"Also remove apks that are certainly not needed from the apk folder (older revisions, copies, Git LFS pointers)")
-	fs.BoolVar(&o.cleanSource, "cleansource", false, "Same as -clean")
+	fs.BoolVar(&o.clean, "clean", false,
+		"Also remove apks that are certainly not needed from the apk folder and apks/removed/ (copies of distributed apks, replaced apks in apks/removed/, Git LFS pointers)")
 	fs.BoolVar(&o.cleanAll, "cleanall", false,
-		"Remove every apk from the apk folder that is not moved into the update folder (also excluded ones and the other ATAK variant)")
+		"Remove every apk from the apk folder and apks/removed/ that is not moved into the update folder (also excluded ones and the other ATAK variant)")
 	fs.BoolVar(&o.yes, "yes", false, "Apply the changes without asking for confirmation (for scripts)")
 	fs.BoolVar(&o.verbose, "v", false, "Verbose: also show the full summary, every apk left in the apk folder, other PDFs and icon notes")
 	if err := fs.Parse(args); err != nil {

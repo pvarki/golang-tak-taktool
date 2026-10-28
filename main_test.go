@@ -2,6 +2,8 @@ package main
 
 import (
 	"io"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -74,4 +76,19 @@ func TestRunExitCodes(t *testing.T) {
 	if code := run([]string{"dp", "-h"}, io.Discard, io.Discard); code != 0 {
 		t.Errorf("dp -h: exit %d, want 0", code)
 	}
+}
+
+func TestVersionCommand(t *testing.T) {
+	for _, args := range [][]string{{"version"}, {"-version"}, {"--version"}} {
+		var out, errOut strings.Builder
+		if code := run(args, &out, &errOut); code != 0 || !strings.HasPrefix(out.String(), "taktool "+version) {
+			t.Errorf("%v: code %d, output %q", args, code, out.String())
+		}
+	}
+}
+
+func TestMain(m *testing.M) {
+	// Tests must not read or write the user's apk cache
+	os.Setenv("TAKTOOL_CACHE", "off")
+	os.Exit(m.Run())
 }

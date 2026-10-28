@@ -13,7 +13,7 @@ package main
 // e.g. "ATAK 5.8 VNS 4.0 UserGuide.pdf", "ATAK 5.8 UserGuide.pdf". Other PDFs
 // in an apk may be outdated (e.g. Data Sync 5.0.2 also bundles the guide of
 // version 3.5), so they are only reported, or copied with their own name when
-// allmanuals: true is set.
+// manuals: all: true is set.
 
 import (
 	"archive/zip"
@@ -198,9 +198,9 @@ func (p *repoPlan) planManuals() error {
 		}
 	}
 
-	slices.SortFunc(labels, func(a, b string) int { return strings.Compare(strings.ToLower(a), strings.ToLower(b)) })
+	sortFold(labels)
 	for _, l := range labels {
-		p.manualNotes = append(p.manualNotes, fmt.Sprintf("%s: other PDFs not copied (set allmanuals: true): %s",
+		p.manualNotes = append(p.manualNotes, fmt.Sprintf("%s: other PDFs not copied (set manuals: all: true to copy them): %s",
 			l, strings.Join(others[l], ", ")))
 	}
 	slices.SortFunc(p.manuals, func(a, b manualFile) int { return strings.Compare(a.name, b.name) })

@@ -30,7 +30,7 @@ func filesIn(t *testing.T, dir string) []string {
 	return names
 }
 
-func TestRemoveOlderPluginVersions(t *testing.T) {
+func TestRemoveOlderApks(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	// The old implementation panicked (index -1) on exactly this input
@@ -43,7 +43,7 @@ func TestRemoveOlderPluginVersions(t *testing.T) {
 		{Package: "com.c.plugin", DisplayName: "C", Revision: "1", Hash: "c", ApkPath: apkFile(t, "c-copy.apk")},
 	}
 
-	out, err := RemoveOlderPluginVersions(in)
+	out, err := removeOlderApks(in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestRemoveOlderKeepsDifferentPackagesWithSameLabel(t *testing.T) {
 		{Package: "com.atakmap.app.civ", DisplayName: "ATAK", Type: "app", Revision: "5", ApkPath: apkFile(t, "civ.apk")},
 		{Package: "com.atakmap.app.mil", DisplayName: "ATAK", Type: "app", Revision: "3", ApkPath: apkFile(t, "mil.apk")},
 	}
-	out, err := RemoveOlderPluginVersions(in)
+	out, err := removeOlderApks(in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestRemoveOlderDeletesNothingWhenUnsure(t *testing.T) {
 			t.Chdir(t.TempDir())
 			apkFile(t, "x.apk")
 			apkFile(t, "y.apk")
-			if _, err := RemoveOlderPluginVersions(pair[:]); err == nil {
+			if _, err := removeOlderApks(pair[:]); err == nil {
 				t.Error("expected an error")
 			}
 			if n := len(filesIn(t, ".")); n != 2 {
@@ -270,4 +270,56 @@ func TestPluginTypeFromPluginAPI(t *testing.T) {
 			t.Errorf("%s: type %q, want %q", got.Package, got.Type, want)
 		}
 	}
+}
+
+func TestPackagePluginsDeletesNothingOnNameCollision(t *testing.T) {
+	t.Chdir(t.TempDir())
+	in := []ApkInfo{
+		{Package: "com.atakmap.app.civ", DisplayName: "ATAK", Type: "app", Revision: "1", Hash: "1", ApkPath: apkFile(t, "civ-old.apk")},
+		{Package: "com.atakmap.app.civ", DisplayName: "ATAK", Type: "app", Revision: "2", Hash: "2", ApkPath: apkFile(t, "civ.apk")},
+		{Package: "com.atakmap.app.mil", DisplayName: "atak", Type: "app", Revision: "1", Hash: "3", ApkPath: apkFile(t, "mil.apk")},
+	}
+	kept, older, err := planOlderVersions(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkRenames(kept, older); err == nil {
+		t.Fatal("expected a name collision")
+	}
+	if got := filesIn(t, "."); len(got) != 3 {
+		t.Errorf("files deleted: %v", got)
+	}
+}
+
+func TestCheckRenamesAllowsNameOfRemovedFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+	// The old vns_plugin.apk is replaced by a newer VNS apk that gets its name
+	in := []ApkInfo{
+		{Package: "com.atakmap.android.vns.plugin", DisplayName: "VNS", Type: "plugin", Revision: "1", Hash: "1", ApkPath: apkFile(t, "vns_plugin.apk")},
+		{Package: "com.atakmap.android.vns.plugin", DisplayName: "VNS", Type: "plugin", Revision: "2", Hash: "2", ApkPath: apkFile(t, "VNS-4.2.apk")},
+	}
+	kept, older, err := planOlderVersions(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkRenames(kept, older); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// removeOlderApks (for the tests) keeps only the newest apk (highest revision code)
+// of each package name and deletes the older apk files from disk.
+//
+// Nothing is deleted if the versions cannot be compared reliably: if a
+// revision code is not a number, or if two different files have the same
+// revision code.
+func removeOlderApks(apkInfos []ApkInfo) ([]ApkInfo, error) {
+	kept, older, err := planOlderVersions(apkInfos)
+	if err != nil {
+		return apkInfos, err
+	}
+	if err := removeOlder(older); err != nil {
+		return apkInfos, err
+	}
+	return kept, nil
 }

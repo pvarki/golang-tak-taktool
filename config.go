@@ -6,7 +6,6 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -15,51 +14,13 @@ import (
 
 const configFileName = "taktool.yaml"
 
-// Config is the content of taktool.yaml. The file is kept in the apk folder
-// together with the apk files. Example:
-//
-//	# ATAK versions the server distributes. Written to repositories.inf.
-//	versions:
-//	  - 5.6.0
-//	  - 5.7.0
-//	  - 5.8.0
-//
-//	# The update folder (any name). Relative paths are relative to this file.
-//	# Default: update
-//	output: /opt/tak/webcontent/update
-//
-//	# Optional. If given, only these packages are distributed; other apks are
-//	# left in the apk folder.
-//	packages:
-//	  - com.atakmap.app.civ
-//	  - com.atakmap.android.datasync.plugin
-//	  - com.atakmap.android.vns.plugin
-//
-//	# Which ATAK is distributed: small (civSmall-release, default) or full
-//	# (civ-release: also 32-bit devices, bundled apps, but about 3x larger)
-//	atak: small
-//
-//	# Optional. For 'taktool manuals': copy the PDF manuals of the
-//	# distributed apks into folder (any name, not inside the update folder).
-//	# all: true also copies the other PDFs found in the apks, with their own
-//	# names. withrepo: true also copies them on every 'taktool repo'.
-//	manuals:
-//	  folder: ../manuals
-//	  all: false
-//	  withrepo: false
-//
-//	# Optional. Apks that are never distributed: glob patterns (* and ?,
-//	# case-insensitive) matched against the file names in the apk folder
-//	# and against package names.
-//	exclude:
-//	  - "*UASTool-DIUBLUE*"
-//	  - com.atakmap.android.atakgo.dji
-//
-//	# Optional. The ATAK versions a package is distributed to, instead of the
-//	# version found in the apk: "all", one version or a list of versions.
-//	targets:
-//	  io.opentakserver.opentakicu: all
-//	  com.example.foo.plugin: [5.7.0, 5.8.0]
+// defaultOutput is the update folder if taktool.yaml does not set output: next
+// to the apk folder, as 'taktool init' creates them.
+const defaultOutput = "../update"
+
+// Config is the content of taktool.yaml, which is kept in the apk folder
+// together with the apks. taktool.example.yaml describes every setting ('taktool
+// init' writes it as taktool.yaml).
 type Config struct {
 	Versions []string       `yaml:"versions"`
 	Output   string         `yaml:"output"`
@@ -71,6 +32,8 @@ type Config struct {
 
 	// targets resolved to version lists
 	targets map[string][]string
+	// outputDefault is true if output is not set
+	outputDefault bool
 
 	// Dir is the directory of the config file: the apk folder.
 	Dir string `yaml:"-"`
@@ -93,7 +56,7 @@ func loadConfig(path string) (*Config, error) {
 	}
 	var c Config
 	if err := yaml.UnmarshalWithOptions(data, &c, yaml.DisallowUnknownField()); err != nil {
-		return nil, configSyntaxError(path, data, err)
+		return nil, configSyntaxError(path, err)
 	}
 
 	abs, err := filepath.Abs(path)
@@ -119,7 +82,7 @@ func loadConfig(path string) (*Config, error) {
 	c.Versions = versions
 
 	if c.Output == "" {
-		c.Output = "update"
+		c.Output, c.outputDefault = defaultOutput, true
 	}
 	if !filepath.IsAbs(c.Output) {
 		c.Output = filepath.Join(c.Dir, c.Output)
@@ -242,13 +205,9 @@ func (c *Config) wantsPackage(pkg string) bool {
 
 // configSyntaxError explains a taktool.yaml that cannot be read and how to
 // fix it.
-func configSyntaxError(path string, data []byte, err error) error {
+func configSyntaxError(path string, err error) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s has an error:\n%s\n\n", path, strings.TrimRight(err.Error(), "\n "))
-	if oldManualsRe.Match(data) {
-		b.WriteString("manuals is a group of settings:\n" +
-			"  manuals:\n    folder: ../manuals\n    all: false\n    withrepo: false\n\n")
-	}
 	initCmd := "taktool init"
 	if abs, e := filepath.Abs(path); e == nil && strings.EqualFold(filepath.Base(filepath.Dir(abs)), "apks") {
 		initCmd = "taktool init .." // init creates apks/taktool.yaml in its folder
@@ -257,7 +216,3 @@ func configSyntaxError(path string, data []byte, err error) error {
 		"and create a new one: '%s' (nothing that exists is changed).", initCmd)
 	return errors.New(b.String())
 }
-
-// oldManualsRe matches the forms of the 2.0 test builds, "manuals: <folder>"
-// and "allmanuals:".
-var oldManualsRe = regexp.MustCompile(`(?m)^(manuals:[ \t]*[^\s#]|allmanuals:)`)

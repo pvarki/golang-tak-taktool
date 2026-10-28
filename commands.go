@@ -21,6 +21,13 @@ var exampleConfig []byte
 //
 // Nothing that exists already is changed.
 func InitFolder(w io.Writer, base string) error {
+	// Run in the apk folder by mistake: it would get apks/, update/ and
+	// manuals/ inside it
+	if _, err := os.Stat(filepath.Join(base, configFileName)); err == nil {
+		abs, _ := filepath.Abs(base)
+		return fmt.Errorf("%s has %s, so it is an apk folder already; run 'taktool init' in the folder above it "+
+			"('taktool init ..'), or 'taktool repo' here", abs, configFileName)
+	}
 	for _, d := range []string{"apks", filepath.Join("apks", "images"), "update", "manuals"} {
 		p := filepath.Join(base, d)
 		if _, err := os.Stat(p); err == nil {
@@ -57,9 +64,9 @@ type manualsOptions struct {
 	verbose bool
 }
 
-// PackageManuals copies the manuals of the apks in the update folder into
+// CopyManuals copies the manuals of the apks in the update folder into
 // the manuals folder of taktool.yaml.
-func PackageManuals(o manualsOptions, out io.Writer) error {
+func CopyManuals(o manualsOptions, out io.Writer) error {
 	cfg, err := loadConfig(o.config)
 	if err != nil {
 		return err
@@ -70,7 +77,7 @@ func PackageManuals(o manualsOptions, out io.Writer) error {
 
 	p := &repoPlan{cfg: cfg}
 	for _, v := range cfg.Versions {
-		vp, err := loadVersionFolder(filepath.Join(cfg.Output, v), v)
+		vp, err := p.loadVersionFolder(filepath.Join(cfg.Output, v), v)
 		if err != nil {
 			return err
 		}
@@ -100,9 +107,10 @@ func PackageManuals(o manualsOptions, out io.Writer) error {
 	return writeManuals(cfg.Manuals.Folder, p.manuals)
 }
 
-// loadVersionFolder reads the apks of a version folder. It returns nil if
-// the folder does not exist.
-func loadVersionFolder(dir, version string) (*versionPlan, error) {
+// loadVersionFolder reads the apks of a version folder for the manuals. It
+// returns nil if the folder does not exist. Apks that cannot be read are
+// skipped with a warning.
+func (p *repoPlan) loadVersionFolder(dir, version string) (*versionPlan, error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -117,10 +125,12 @@ func loadVersionFolder(dir, version string) (*versionPlan, error) {
 		}
 		path := filepath.Join(dir, e.Name())
 		if lfs, _ := isLFSPointer(path); lfs {
+			p.warn("%s/%s is a Git LFS pointer, not an apk", version, e.Name())
 			continue
 		}
 		info, err := getApkData(path)
 		if err != nil {
+			p.warn("%s/%s cannot be read (%v); its manuals were not copied", version, e.Name(), err)
 			continue
 		}
 		vp.apks[info.Package] = &repoApk{info: info, path: path}

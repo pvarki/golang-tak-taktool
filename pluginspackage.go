@@ -77,11 +77,18 @@ func PackagePlugins(renamePlugins bool) error {
 	// If renamePlugins is true, remove older versions of the same package and
 	// rename the apk files to their preferred names
 	if renamePlugins {
-		apkInfos, err = RemoveOlderPluginVersions(apkInfos)
+		// Check everything before anything is deleted or renamed
+		kept, older, err := planOlderVersions(apkInfos)
 		if err != nil {
 			return fmt.Errorf("error removing older versions: %w", err)
 		}
-		apkInfos, err = RenamePlugins(apkInfos)
+		if err := checkRenames(kept, older); err != nil {
+			return fmt.Errorf("error renaming plugins: %w", err)
+		}
+		if err := removeOlder(older); err != nil {
+			return fmt.Errorf("error removing older versions: %w", err)
+		}
+		apkInfos, err = RenamePlugins(kept)
 		if err != nil {
 			return fmt.Errorf("error renaming plugins: %w", err)
 		}
@@ -108,12 +115,6 @@ func PackagePlugins(renamePlugins bool) error {
 // Notes about icons are written to log. The file is written to a temporary
 // file and renamed only after everything has been written.
 func writeProductInfz(dir string, apkInfos []ApkInfo, imagesDir string, log io.Writer) (err error) {
-	// Check if there are custom images in the images directory
-	customImagesList, err := checkForCustomImages(imagesDir)
-	if err != nil {
-		return fmt.Errorf("error checking for custom images: %w", err)
-	}
-
 	name := filepath.Join(dir, productInfzFilename)
 	tmpName := name + ".tmp"
 	file, err := os.Create(tmpName)
@@ -126,11 +127,33 @@ func writeProductInfz(dir string, apkInfos []ApkInfo, imagesDir string, log io.W
 			os.Remove(tmpName)
 		}
 	}()
-	zipWriter := zip.NewWriter(file)
+	if err = buildProductInfz(file, dir, apkInfos, imagesDir, log); err != nil {
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return fmt.Errorf("error closing file: %w", err)
+	}
+	if err = os.Rename(tmpName, name); err != nil {
+		return fmt.Errorf("error renaming %s to %s: %w", tmpName, name, err)
+	}
+	return nil
+}
+
+// buildProductInfz writes product.infz (a zip with the icons and
+// product.inf) to w. It sets the IconPath of each apkInfo.
+func buildProductInfz(w io.Writer, dir string, apkInfos []ApkInfo, imagesDir string, log io.Writer) error {
+	if log == nil {
+		log = io.Discard
+	}
+	customImagesList, err := listCustomImages(imagesDir)
+	if err != nil {
+		return fmt.Errorf("error checking for custom images: %w", err)
+	}
+	zipWriter := zip.NewWriter(w)
 
 	// Get icon files from apk files and add them to zip
 	for i := range apkInfos {
-		if err = addIcon(zipWriter, dir, &apkInfos[i], imagesDir, customImagesList, log); err != nil {
+		if err := addIcon(zipWriter, dir, &apkInfos[i], imagesDir, customImagesList, log); err != nil {
 			return err
 		}
 	}
@@ -147,12 +170,6 @@ func writeProductInfz(dir string, apkInfos []ApkInfo, imagesDir string, log io.W
 	// Close writes the zip central directory, so its error must be checked
 	if err = zipWriter.Close(); err != nil {
 		return fmt.Errorf("error finishing zip: %w", err)
-	}
-	if err = file.Close(); err != nil {
-		return fmt.Errorf("error closing file: %w", err)
-	}
-	if err = os.Rename(tmpName, name); err != nil {
-		return fmt.Errorf("error renaming %s to %s: %w", tmpName, name, err)
 	}
 	return nil
 }
@@ -186,7 +203,7 @@ func addIcon(zw *zip.Writer, dir string, apkInfo *ApkInfo, imagesDir string, cus
 	if src == "" {
 		src = filepath.Join(dir, apkInfo.ApkPath)
 	}
-	data, kind, err := apkIcon(src, iconInApk)
+	data, kind, _, err := cachedApkIcon(src, iconInApk)
 	if err != nil {
 		fmt.Fprintf(log, "No usable icon for %s (%v), using an empty icon\n", apkInfo.DisplayName, err)
 		data = emptyPng
@@ -276,8 +293,8 @@ func normalizeImageName(name string) string {
 	}, name)
 }
 
-// checkForCustomImages lists the png files in imagesDir (if it exists)
-func checkForCustomImages(imagesDir string) ([]string, error) {
+// listCustomImages lists the png files in imagesDir (if it exists).
+func listCustomImages(imagesDir string) ([]string, error) {
 	customImagesList := []string{}
 
 	// Check if the images directory exists
@@ -292,7 +309,7 @@ func checkForCustomImages(imagesDir string) ([]string, error) {
 
 	// Add all png files in the images directory to the customImagesList
 	for _, entry := range dirContents {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".png") {
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".png") {
 			customImagesList = append(customImagesList, entry.Name())
 		}
 	}
@@ -300,15 +317,16 @@ func checkForCustomImages(imagesDir string) ([]string, error) {
 	return customImagesList, nil
 }
 
-// RemoveOlderPluginVersions keeps only the newest apk (highest revision code)
-// of each package name and deletes the older apk files from disk.
-//
-// Nothing is deleted if the versions cannot be compared reliably: if a
-// revision code is not a number, or if two different files have the same
-// revision code.
-func RemoveOlderPluginVersions(apkInfos []ApkInfo) ([]ApkInfo, error) {
-	newest := map[string]int{} // package name -> index of the newest apk so far
-	older := map[int]int{}     // index of an older apk -> index of the apk that replaces it
+// olderApk is an apk that is replaced by a newer revision (or is a copy).
+type olderApk struct {
+	apk, keep ApkInfo
+}
+
+// planOlderVersions decides which apks are older revisions or copies of
+// another apk of the same package, without changing anything.
+func planOlderVersions(apkInfos []ApkInfo) (kept []ApkInfo, older []olderApk, err error) {
+	newest := map[string]int{}  // package name -> index of the newest apk so far
+	replacedBy := map[int]int{} // index of an older apk -> index of the apk that replaces it
 
 	for i, a := range apkInfos {
 		j, seen := newest[a.Package]
@@ -321,58 +339,91 @@ func RemoveOlderPluginVersions(apkInfos []ApkInfo) ([]ApkInfo, error) {
 		revA, errA := strconv.ParseInt(a.Revision, 10, 64)
 		revB, errB := strconv.ParseInt(b.Revision, 10, 64)
 		if errA != nil || errB != nil {
-			return apkInfos, fmt.Errorf("cannot compare %s and %s (package %s): revision code %q / %q is not a number",
+			return nil, nil, fmt.Errorf("cannot compare %s and %s (package %s): revision code %q / %q is not a number",
 				a.ApkPath, b.ApkPath, a.Package, a.Revision, b.Revision)
 		}
 
 		switch {
 		case revA > revB:
-			older[j] = i
+			replacedBy[j] = i
 			newest[a.Package] = i
 		case revA < revB:
-			older[i] = j
+			replacedBy[i] = j
 		case a.Hash == b.Hash:
-			older[i] = j // identical copy
+			replacedBy[i] = j // identical copy
 		default:
-			return apkInfos, fmt.Errorf("%s and %s (package %s) have the same revision code %s but different content; remove one of them",
+			return nil, nil, fmt.Errorf("%s and %s (package %s) have the same revision code %s but different content; remove one of them",
 				a.ApkPath, b.ApkPath, a.Package, a.Revision)
 		}
 	}
 
-	if len(older) == 0 {
-		return apkInfos, nil
-	}
-
-	// Resolve the newest apk of each package for the log messages
-	kept := func(i int) ApkInfo {
+	// The newest apk of each package
+	keep := func(i int) ApkInfo {
 		for {
-			next, ok := older[i]
+			next, ok := replacedBy[i]
 			if !ok {
 				return apkInfos[i]
 			}
 			i = next
 		}
 	}
-
-	result := make([]ApkInfo, 0, len(apkInfos)-len(older))
 	for i, a := range apkInfos {
-		if _, isOlder := older[i]; !isOlder {
-			result = append(result, a)
-			continue
-		}
-		k := kept(i)
-		fmt.Printf("Removing older version: %s revision %s (%s), keeping revision %s (%s)\n",
-			a.DisplayName, a.Revision, a.ApkPath, k.Revision, k.ApkPath)
-		if signersDiffer(a.ApkPath, k.ApkPath) {
-			fmt.Printf("Warning: %s and %s are signed with different certificates; devices cannot update from one to the other, the old version must be uninstalled first\n",
-				a.ApkPath, k.ApkPath)
-		}
-		if err := os.Remove(a.ApkPath); err != nil {
-			return apkInfos, err
+		if _, isOlder := replacedBy[i]; isOlder {
+			older = append(older, olderApk{apk: a, keep: keep(i)})
+		} else {
+			kept = append(kept, a)
 		}
 	}
+	return kept, older, nil
+}
 
-	return result, nil
+// removeOlder deletes the older apks.
+func removeOlder(older []olderApk) error {
+	for _, o := range older {
+		fmt.Printf("Removing older version: %s revision %s (%s), keeping revision %s (%s)\n",
+			o.apk.DisplayName, o.apk.Revision, o.apk.ApkPath, o.keep.Revision, o.keep.ApkPath)
+		if signersDiffer(o.apk.ApkPath, o.keep.ApkPath) {
+			fmt.Printf("Warning: %s and %s are signed with different certificates; devices cannot update from one to the other, the old version must be uninstalled first\n",
+				o.apk.ApkPath, o.keep.ApkPath)
+		}
+		if err := os.Remove(o.apk.ApkPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkRenames checks that the apks can be renamed to their preferred names:
+// no two get the same name, and no other file has the name (files that are
+// going to be removed do not count).
+func checkRenames(apkInfos []ApkInfo, removed []olderApk) error {
+	gone := map[string]bool{}
+	for _, o := range removed {
+		gone[strings.ToLower(o.apk.ApkPath)] = true
+	}
+	targets := map[string]ApkInfo{}
+	for _, a := range apkInfos {
+		newName := preferredApkName(a)
+		key := strings.ToLower(newName)
+		if other, dup := targets[key]; dup {
+			return fmt.Errorf("%s (%s) and %s (%s) would both be renamed to %s; use -renamepluginsdisabled or keep them in different directories",
+				a.ApkPath, a.Package, other.ApkPath, other.Package, newName)
+		}
+		targets[key] = a
+		if newName == a.ApkPath || gone[key] {
+			continue
+		}
+		if dst, err := os.Stat(newName); err == nil {
+			src, err := os.Stat(a.ApkPath)
+			if err != nil {
+				return err
+			}
+			if !os.SameFile(src, dst) {
+				return fmt.Errorf("cannot rename %s to %s: %s already exists", a.ApkPath, newName, newName)
+			}
+		}
+	}
+	return nil
 }
 
 // preferredApkName returns the file name an apk is renamed to,
@@ -388,37 +439,14 @@ func preferredApkName(a ApkInfo) string {
 // RenamePlugins renames the apk files to their preferred names. It checks all
 // new names before renaming anything and never overwrites another file.
 func RenamePlugins(apkInfos []ApkInfo) ([]ApkInfo, error) {
-	// Two packages can have the same label (e.g. ATAK CIV and ATAK MIL);
-	// they would get the same file name. Compare case-insensitively because
-	// the file system may be case-insensitive (Windows, macOS).
-	targets := map[string]ApkInfo{}
-	for _, a := range apkInfos {
-		key := strings.ToLower(preferredApkName(a))
-		if other, dup := targets[key]; dup {
-			return apkInfos, fmt.Errorf("%s (%s) and %s (%s) would both be renamed to %s; use -renamepluginsdisabled or keep them in different directories",
-				a.ApkPath, a.Package, other.ApkPath, other.Package, preferredApkName(a))
-		}
-		targets[key] = a
+	if err := checkRenames(apkInfos, nil); err != nil {
+		return apkInfos, err
 	}
-
 	for i, a := range apkInfos {
 		newName := preferredApkName(a)
 		if newName == a.ApkPath {
 			continue
 		}
-
-		if dst, err := os.Stat(newName); err == nil {
-			src, err := os.Stat(a.ApkPath)
-			if err != nil {
-				return apkInfos, err
-			}
-			// On a case-insensitive file system "ATAK_app.apk" and
-			// "atak_app.apk" are the same file; renaming only changes the case.
-			if !os.SameFile(src, dst) {
-				return apkInfos, fmt.Errorf("cannot rename %s to %s: %s already exists", a.ApkPath, newName, newName)
-			}
-		}
-
 		if err := os.Rename(a.ApkPath, newName); err != nil {
 			return apkInfos, err
 		}
@@ -427,7 +455,9 @@ func RenamePlugins(apkInfos []ApkInfo) ([]ApkInfo, error) {
 	return apkInfos, nil
 }
 
-func getApkData(apkPath string) (ApkInfo, error) {
+// readApkData reads the data of an apk for product.inf from the file; use
+// getApkData, which caches it.
+func readApkData(apkPath string) (ApkInfo, error) {
 	var err error
 
 	//Buffer to write the xml data into
@@ -466,22 +496,12 @@ func getApkData(apkPath string) (ApkInfo, error) {
 	apkData.Size = int(info.Size())
 
 	// Calculate hash SHA-256 for apk file
-	apkData.Hash, err = calculateHash(apkPath)
+	apkData.Hash, err = verifiedHash(apkPath)
 	if err != nil {
 		return ApkInfo{}, fmt.Errorf("error calculating hash: %w", err)
 	}
 
 	return apkData, nil
-}
-
-// attrValue returns the value of the attribute with the given local name.
-func attrValue(se xml.StartElement, name string) (string, bool) {
-	for _, attr := range se.Attr {
-		if attr.Name.Local == name {
-			return attr.Value, true
-		}
-	}
-	return "", false
 }
 
 func readParametersFromXML(reader io.Reader) (ApkInfo, error) {
@@ -507,13 +527,13 @@ func readParametersFromXML(reader io.Reader) (ApkInfo, error) {
 
 		switch se.Name.Local {
 		case "manifest":
-			if v, ok := attrValue(se, "package"); ok {
+			if v, ok := attr(se, "package"); ok {
 				apkData.Package = cleanupValue(v)
 			}
-			if v, ok := attrValue(se, "versionCode"); ok {
+			if v, ok := attr(se, "versionCode"); ok {
 				apkData.Revision = cleanupValue(v)
 			}
-			if v, ok := attrValue(se, "versionName"); ok {
+			if v, ok := attr(se, "versionName"); ok {
 				apkData.Version = cleanupValue(v)
 			}
 		case "uses-sdk":
@@ -521,24 +541,24 @@ func readParametersFromXML(reader io.Reader) (ApkInfo, error) {
 			// product.inf that TAK builds for the apps bundled with ATAK.
 			// ATAK shows it in the app details. Keep the default 1 (what
 			// ATAK itself writes when it does not know) if it is missing.
-			if v, ok := attrValue(se, "minSdkVersion"); ok {
+			if v, ok := attr(se, "minSdkVersion"); ok {
 				if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
 					apkData.OsReq = n
 				}
 			}
 		case "application":
-			if v, ok := attrValue(se, "label"); ok {
+			if v, ok := attr(se, "label"); ok {
 				apkData.DisplayName = cleanupValue(v)
 			}
-			if v, ok := attrValue(se, "description"); ok {
+			if v, ok := attr(se, "description"); ok {
 				apkData.Description = cleanupValue(v)
 			}
-			if v, ok := attrValue(se, "icon"); ok {
+			if v, ok := attr(se, "icon"); ok {
 				apkData.IconPath = cleanupValue(v)
 			}
 		case "meta-data":
-			name, _ := attrValue(se, "name")
-			value, hasValue := attrValue(se, "value")
+			name, _ := attr(se, "name")
+			value, hasValue := attr(se, "value")
 			if !hasValue {
 				continue
 			}

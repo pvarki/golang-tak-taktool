@@ -102,3 +102,27 @@ func TestPackageDataPackageRejectsBadUID(t *testing.T) {
 		t.Error("expected an error for an invalid UID")
 	}
 }
+
+func TestCollectFilesSkipsHiddenAndOldPackages(t *testing.T) {
+	root := t.TempDir()
+	for _, f := range []string{"a.kml", "old.dpk", "sub/b.dpk", ".git/config", ".DS_Store", "sub/Thumbs.db", "sub/c.txt", "new.dpk"} {
+		p := filepath.Join(root, filepath.FromSlash(f))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(f), 0o644)
+	}
+	// old.dpk is a data package of an earlier run; plain.dpk is not
+	f, _ := os.Create(filepath.Join(root, "old.dpk"))
+	zw := zip.NewWriter(f)
+	zw.Create("MANIFEST/manifest.xml")
+	zw.Close()
+	f.Close()
+	os.WriteFile(filepath.Join(root, "plain.dpk"), []byte("x"), 0o644)
+	got, err := collectFiles(root, ".dpk", "new.dpk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Data packages only in the root folder are left out; sub/b.dpk is content
+	if want := []string{"a.kml", "plain.dpk", "sub/b.dpk", "sub/c.txt"}; !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}

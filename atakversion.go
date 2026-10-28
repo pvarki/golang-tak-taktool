@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -154,3 +155,13 @@ func detectAtakVariant(path string, info ApkInfo) (variant, warning string, err 
 	}
 	return variant, warning, nil
 }
+
+// templatePackages are the package names of ATAK's plugin template and
+// sample plugin. A plugin that still uses one cannot be told apart from other
+// plugins built from the same template: ATAK would replace one with another.
+var templatePackages = []string{
+	"com.atakmap.android.plugintemplate.plugin",
+	"com.atakmap.android.helloworld.plugin",
+}
+
+func isTemplatePackage(pkg string) bool { return slices.Contains(templatePackages, pkg) }

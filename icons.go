@@ -10,7 +10,10 @@ import (
 	"image/draw"
 	"image/png"
 	"io"
+	"math"
 	"path"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/avast/apkparser"
@@ -26,13 +29,13 @@ const convertedIconSize = 144
 // apk as apkparser resolves it (a png if the apk has one). A png icon is
 // returned as it is; WebP icons, vector drawables, layer lists and adaptive
 // icons are converted. kind says which it was ("png", "webp", "vector", ...).
-func apkIcon(apkPath, iconPath string) (data []byte, kind string, err error) {
+func apkIcon(apkPath, iconPath string) (data []byte, kind string, notes []string, err error) {
 	if iconPath == "" {
-		return nil, "", errors.New("the apk has no icon")
+		return nil, "", nil, errors.New("the apk has no icon")
 	}
 	zr, err := zip.OpenReader(apkPath)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	defer zr.Close()
 	a := &iconApk{path: apkPath, files: map[string]*zip.File{}}
@@ -42,26 +45,27 @@ func apkIcon(apkPath, iconPath string) (data []byte, kind string, err error) {
 
 	if strings.EqualFold(path.Ext(iconPath), ".png") {
 		b, err := a.read(iconPath)
-		return b, "png", err
+		return b, "png", nil, err
 	}
 
 	img, kind, err := a.render(iconPath, convertedIconSize, 0)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	if isTransparent(img) {
-		return nil, "", fmt.Errorf("%s (%s) could not be drawn", iconPath, kind)
+	if nearlyTransparent(img) {
+		return nil, "", a.notes, fmt.Errorf("%s (%s) could not be drawn", iconPath, kind)
 	}
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	return buf.Bytes(), kind, nil
+	return buf.Bytes(), kind, a.notes, nil
 }
 
 type iconApk struct {
 	path  string
 	files map[string]*zip.File
+	notes []string // what could not be drawn
 }
 
 func (a *iconApk) read(name string) ([]byte, error) {
@@ -156,26 +160,91 @@ func (a *iconApk) render(name string, size, depth int) (image.Image, string, err
 	return nil, "", fmt.Errorf("%s: unsupported icon format", name)
 }
 
-// renderXML draws a drawable XML resource.
-func (a *iconApk) renderXML(name, src string, size, depth int) (image.Image, string, error) {
+// xnode is an element of a drawable XML resource.
+type xnode struct {
+	start    xml.StartElement
+	children []*xnode
+}
+
+func parseXNode(src string) (*xnode, error) {
 	dec := xml.NewDecoder(strings.NewReader(src))
-	var root string
-	var elems []xml.StartElement
+	var root *xnode
+	var stack []*xnode
 	for {
 		t, err := dec.Token()
-		if err != nil {
+		if err == io.EOF {
 			break
 		}
-		if se, ok := t.(xml.StartElement); ok {
-			if root == "" {
-				root = se.Name.Local
+		if err != nil {
+			return nil, err
+		}
+		switch t := t.(type) {
+		case xml.StartElement:
+			n := &xnode{start: t.Copy()}
+			if len(stack) == 0 {
+				if root == nil {
+					root = n
+				}
+			} else {
+				p := stack[len(stack)-1]
+				p.children = append(p.children, n)
 			}
-			elems = append(elems, se.Copy())
+			stack = append(stack, n)
+		case xml.EndElement:
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
 		}
 	}
+	if root == nil {
+		return nil, errors.New("empty drawable")
+	}
+	return root, nil
+}
+
+// xml returns the element as XML text again (for an inline <vector>).
+func (n *xnode) xml() string {
+	var sb strings.Builder
+	enc := xml.NewEncoder(&sb)
+	var write func(*xnode)
+	write = func(n *xnode) {
+		enc.EncodeToken(n.start)
+		for _, c := range n.children {
+			write(c)
+		}
+		enc.EncodeToken(n.start.End())
+	}
+	write(n)
+	enc.Flush()
+	return sb.String()
+}
+
+func (n *xnode) attr(name string) (string, bool) { return attr(n.start, name) }
+
+// renderXML draws a drawable XML resource.
+func (a *iconApk) renderXML(name, src string, size, depth int) (image.Image, string, error) {
+	n, err := parseXNode(src)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: %w", name, err)
+	}
+	return a.renderNode(name, n, size, depth)
+}
+
+// renderNode draws a drawable element: <vector>, <layer-list>,
+// <adaptive-icon>, <bitmap>, <inset> or <color>.
+func (a *iconApk) renderNode(name string, n *xnode, size, depth int) (image.Image, string, error) {
+	if depth > 8 {
+		return nil, "", errors.New("drawable nested too deeply")
+	}
+	root := n.start.Name.Local
 	switch root {
 	case "vector":
-		img, err := renderVector(src, size)
+		img, notes, err := renderVectorNotes(n.xml(), size)
+		for _, note := range notes {
+			if !slices.Contains(a.notes, note) {
+				a.notes = append(a.notes, note)
+			}
+		}
 		return img, "vector", err
 	case "layer-list", "adaptive-icon":
 		// Adaptive icon layers are 108 dp, of which the launcher shows the
@@ -185,19 +254,17 @@ func (a *iconApk) renderXML(name, src string, size, depth int) (image.Image, str
 			full = size * 3 / 2
 		}
 		dst := image.NewNRGBA(image.Rect(0, 0, full, full))
-		for _, se := range elems[1:] {
-			if se.Name.Local == "monochrome" {
+		for _, c := range n.children {
+			if c.start.Name.Local == "monochrome" {
 				continue // themed icon layer of Android 13
 			}
-			d, ok := attr(se, "drawable")
-			if !ok {
-				continue
-			}
-			img, _, err := a.render(d, full, depth+1)
+			img, _, err := a.renderChild(name, c, full, depth+1)
 			if err != nil {
 				return nil, "", err
 			}
-			draw.Draw(dst, dst.Bounds(), img, image.Point{}, draw.Over)
+			if img != nil {
+				draw.Draw(dst, dst.Bounds(), img, image.Point{}, draw.Over)
+			}
 		}
 		if full != size {
 			off := (full - size) / 2
@@ -206,15 +273,92 @@ func (a *iconApk) renderXML(name, src string, size, depth int) (image.Image, str
 			return crop, root, nil
 		}
 		return dst, root, nil
-	case "bitmap", "inset":
-		for _, k := range []string{"src", "drawable"} {
-			if d, ok := attr(elems[0], k); ok {
-				img, kind, err := a.render(d, size, depth+1)
-				return img, root + " " + kind, err
+	case "bitmap":
+		if d, ok := n.attr("src"); ok {
+			img, kind, err := a.render(d, size, depth+1)
+			return img, "bitmap " + kind, err
+		}
+	case "inset":
+		l, t, r, b := insets(n, size)
+		inner := size - l - r
+		if h := size - t - b; h < inner {
+			inner = h
+		}
+		if inner <= 0 {
+			return nil, "", fmt.Errorf("%s: insets fill the whole icon", name)
+		}
+		img, kind, err := a.renderChild(name, n, inner, depth+1)
+		if err != nil || img == nil {
+			if err == nil {
+				err = fmt.Errorf("%s: empty <inset>", name)
 			}
+			return nil, "", err
+		}
+		dst := image.NewNRGBA(image.Rect(0, 0, size, size))
+		draw.Draw(dst, image.Rect(l, t, l+inner, t+inner), img, image.Point{}, draw.Over)
+		return dst, "inset " + kind, nil
+	case "color":
+		if v, ok := n.attr("color"); ok {
+			return a.render(v, size, depth+1)
 		}
 	}
 	return nil, "", fmt.Errorf("%s: <%s> icons are not supported", name, root)
+}
+
+// renderChild draws the drawable of an <item>, <background>, <foreground> or
+// <inset>: its android:drawable, or the drawable element inside it. It
+// returns nil for an element without a drawable.
+func (a *iconApk) renderChild(name string, n *xnode, size, depth int) (image.Image, string, error) {
+	if d, ok := n.attr("drawable"); ok {
+		return a.render(d, size, depth)
+	}
+	for _, c := range n.children {
+		return a.renderNode(name, c, size, depth)
+	}
+	return nil, "", nil
+}
+
+// insets returns the insets of an <inset> in pixels of an icon of size.
+func insets(n *xnode, size int) (l, t, r, b int) {
+	px := func(names ...string) int {
+		for _, name := range names {
+			if v, ok := n.attr(name); ok {
+				return insetPixels(v, size)
+			}
+		}
+		return 0
+	}
+	return px("insetLeft", "inset"), px("insetTop", "inset"), px("insetRight", "inset"), px("insetBottom", "inset")
+}
+
+// insetPixels converts an inset value as apkparser writes it (a complex
+// dimension or fraction as a decimal number) to pixels of an icon of size.
+// Fractions (16.7%) are relative to the size; dp values to the 108 dp of an
+// adaptive icon layer, the usual place of insets in icons.
+func insetPixels(v string, size int) int {
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0
+	}
+	value, unit := complexValue(uint32(n))
+	var frac float64
+	switch unit {
+	case 0: // a fraction (px insets are not used in icons)
+		frac = value
+	default: // dp and other dimensions
+		frac = value / 108
+	}
+	if frac < 0 || frac >= 0.5 {
+		return 0
+	}
+	return int(math.Round(frac * float64(size)))
+}
+
+// complexValue decodes an Android complex value (dimension or fraction):
+// its value and its unit (the lowest 4 bits).
+func complexValue(c uint32) (float64, uint32) {
+	mult := [4]float64{1.0 / (1 << 8), 1.0 / (1 << 15), 1.0 / (1 << 23), 1.0 / (1 << 31)}
+	return float64(int32(c&0xffffff00)) * mult[(c>>4)&3], c & 0xf
 }
 
 func scaleImage(img image.Image, size int) image.Image {
@@ -227,11 +371,13 @@ func scaleImage(img image.Image, size int) image.Image {
 	return dst
 }
 
-func isTransparent(img image.Image) bool {
+// nearlyTransparent reports whether no pixel of img is clearly visible (an
+// icon drawn with colours that could not be resolved).
+func nearlyTransparent(img image.Image) bool {
 	b := img.Bounds()
 	for y := b.Min.Y; y < b.Max.Y; y++ {
 		for x := b.Min.X; x < b.Max.X; x++ {
-			if _, _, _, al := img.At(x, y).RGBA(); al != 0 {
+			if _, _, _, al := img.At(x, y).RGBA(); al > 0x1000 {
 				return false
 			}
 		}

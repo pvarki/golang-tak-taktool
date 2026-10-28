@@ -10,7 +10,7 @@ versions:
   - 5.8.0
 
 # The update folder that TAK Server serves (webcontent/update on the server).
-# Default: update
+# Default: ../update
 output: ../update
 
 # Which ATAK is distributed: small (civSmall-release, default) or full

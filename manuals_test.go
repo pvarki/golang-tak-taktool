@@ -177,9 +177,26 @@ func TestConfigSyntaxError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, want := range []string{"has an error", "manuals is a group", "folder: ../manuals", "'taktool init ..'"} {
+	for _, want := range []string{"has an error", "taktool.example.yaml", "'taktool init ..'"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not contain %q:\n%v", want, err)
 		}
+	}
+}
+
+func TestInitRefusesApkFolder(t *testing.T) {
+	base := t.TempDir()
+	var out strings.Builder
+	if err := InitFolder(&out, base); err != nil {
+		t.Fatal(err)
+	}
+	// Again inside apks/: refused, nothing created there
+	apks := filepath.Join(base, "apks")
+	err := InitFolder(&out, apks)
+	if err == nil || !strings.Contains(err.Error(), "apk folder already") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(apks, "update")); !os.IsNotExist(err) {
+		t.Error("update/ created inside the apk folder")
 	}
 }

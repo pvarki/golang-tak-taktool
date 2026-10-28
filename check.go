@@ -125,19 +125,13 @@ func checkRepository(dir string, cfg *Config) (*checkResult, error) {
 		rows := checkVersionFolder(r, dir, v)
 		var summary []string
 		slices.SortFunc(rows, func(a, b productInfRow) int {
-			if isAtakApp(a.Package) != isAtakApp(b.Package) {
-				if isAtakApp(a.Package) {
-					return -1
-				}
-				return 1
-			}
-			return strings.Compare(strings.ToLower(a.DisplayName), strings.ToLower(b.DisplayName))
+			return compareAtakFirst(a.Package, a.DisplayName, b.Package, b.DisplayName)
 		})
 		for _, row := range rows {
 			name := row.DisplayName + " " + shortVersion(row.Version)
 			if isAtakApp(row.Package) {
 				info := ApkInfo{Version: row.Version}
-				if variant, _, err := detectAtakVariant(filepath.Join(dir, v, row.ApkPath), info); err == nil {
+				if variant, _, err := cachedAtakVariant(filepath.Join(dir, v, row.ApkPath), info); err == nil {
 					name += " (" + variant + ")"
 					if cfg != nil && variant != cfg.Atak {
 						r.warnf("%s: ATAK %s is distributed, but atak: %s in %s", v, variant, cfg.Atak, configFileName)
@@ -151,7 +145,7 @@ func checkRepository(dir string, cfg *Config) (*checkResult, error) {
 			}
 			byPkg[row.Package][v] = row
 			names[row.Package] = row.DisplayName
-			if fps, err := signingCerts(filepath.Join(dir, v, row.ApkPath)); err == nil {
+			if fps, err := cachedSigningCerts(filepath.Join(dir, v, row.ApkPath)); err == nil {
 				certs[row.Package][v] = fps
 			}
 		}
@@ -165,13 +159,23 @@ func checkRepository(dir string, cfg *Config) (*checkResult, error) {
 	// otherwise every package found in any version
 	var expected []string
 	if cfg != nil && len(cfg.Packages) > 0 {
-		expected = cfg.Packages
+		expected = slices.Clone(cfg.Packages)
 	} else {
 		for pkg := range byPkg {
 			expected = append(expected, pkg)
 		}
-		slices.Sort(expected)
 	}
+	// By name as in the summary
+	slices.SortFunc(expected, func(a, b string) int {
+		na, nb := names[a], names[b]
+		if na == "" {
+			na = a
+		}
+		if nb == "" {
+			nb = b
+		}
+		return compareAtakFirst(a, na, b, nb)
+	})
 	for _, pkg := range expected {
 		name := names[pkg]
 		if name == "" {
@@ -183,14 +187,46 @@ func checkRepository(dir string, cfg *Config) (*checkResult, error) {
 				in = append(in, v)
 			}
 		}
+		var missing []string
 		for _, v := range versions {
-			if _, ok := byPkg[pkg][v]; ok {
+			if _, ok := byPkg[pkg][v]; !ok {
+				missing = append(missing, v)
+			}
+		}
+		switch {
+		case len(missing) == 0:
+		case len(in) > 0:
+			r.warnf("%s (%s): not in %s; it is in %s", name, pkg, strings.Join(missing, ", "), strings.Join(in, ", "))
+		default:
+			r.warnf("%s: not in any version", pkg)
+		}
+	}
+
+	// Plugins that still use the package name of ATAK's plugin template
+	for _, pkg := range slices.Sorted(maps.Keys(byPkg)) {
+		if isTemplatePackage(pkg) {
+			r.warnf("%s (%s) uses the plugin template's package name; run 'taktool repo' to take it out", names[pkg], pkg)
+		}
+	}
+
+	// Apks in a version they are not for: targets of taktool.yaml, or the
+	// ATAK version in the apk (plugin-api)
+	for _, pkg := range slices.Sorted(maps.Keys(byPkg)) {
+		for _, v := range versions {
+			row, ok := byPkg[pkg][v]
+			if !ok {
 				continue
 			}
-			if len(in) > 0 {
-				r.warnf("%s: no %s (%s); it is in %s", v, name, pkg, strings.Join(in, ", "))
-			} else {
-				r.warnf("%s: no %s (%s)", v, name, pkg)
+			if cfg != nil {
+				if vs, set := cfg.targetVersions(pkg); set {
+					if !slices.Contains(vs, v) {
+						r.warnf("%s: %s is not for %s by targets in %s; run 'taktool repo'", v, row.DisplayName, v, configFileName)
+					}
+					continue
+				}
+			}
+			if m := takReqRe.FindStringSubmatch(row.TakReq); m != nil && m[1] != v {
+				r.warnf("%s: %s is made for ATAK %s", v, row.DisplayName, m[1])
 			}
 		}
 	}
@@ -290,7 +326,7 @@ func checkRow(r *checkResult, vdir, v string, row productInfRow, inZip map[strin
 	if size, err := strconv.ParseInt(row.Size, 10, 64); err != nil || size != info.Size() {
 		r.errorf("%s: size %d does not match product.inf (%s)", where, info.Size(), row.Size)
 	}
-	if hash, err := calculateHash(path); err != nil {
+	if hash, err := verifiedHash(path); err != nil {
 		r.errorf("%s: %v", where, err)
 	} else if hash != row.Hash {
 		r.errorf("%s: sha256 does not match product.inf", where)
